@@ -253,16 +253,70 @@ jobs:
       - name: build the run-queue test
         run: bazel build --config=ci //cgroup-signals/internal/runqlat:runqlat_test
 
-      # -test.run Load: TestLoad, and a failure to load (or no delay counted
-      # for a process that waited for a CPU) fails the job. A skip is a
-      # failure too: the point is that it ran.
+      # -test.run: TestLoad (a failure to load, or no delay counted for a
+      # process that waited for a CPU, fails the job) and TestCacheInvalidation
+      # (what the program remembers per task is dropped when it stops being
+      # true). A skip is a failure too: the point is that they ran.
       - name: load and attach the program as root
         run: |
           uname -r
           test_bin="$(bazel info --config=ci bazel-bin)/cgroup-signals/internal/runqlat/runqlat_test_/runqlat_test"
-          out="$(sudo "${test_bin}" -test.v -test.run '^TestLoad$' 2>&1)" || { echo "${out}"; exit 1; }
+          out="$(sudo "${test_bin}" -test.v -test.run '^(TestLoad|TestCacheInvalidation)$' 2>&1)" || { echo "${out}"; exit 1; }
           echo "${out}"
-          grep -q -- '--- PASS: TestLoad' <<<"${out}" || { echo "::error::TestLoad did not run and pass" >&2; exit 1; }
+          for t in TestLoad TestCacheInvalidation; do
+            grep -q -- "--- PASS: ${t}" <<<"${out}" || { echo "::error::${t} did not run and pass" >&2; exit 1; }
+          done
+
+      # What the programs cost, on the runner's kernel: the object this change
+      # builds against the one the base commit builds, under the same
+      # scheduler load (TestMeasure), alternating, three rounds each. The
+      # numbers are the kernel's own run_cnt and run_time_ns (so they include
+      # its clock reads) and are of this runner, not of any other machine: the
+      # ratio is what carries over. Informational: it never fails the job.
+      - name: checkout the base commit
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - name: measure the programs, base and head
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          head_obj="$(bazel info --config=ci bazel-bin)/bpf/runqlat.bpf.o"
+          bazel build --config=ci //bpf:runqlat
+          (cd base && bazel build --config=ci //bpf:runqlat)
+          base_obj="$(cd base && bazel info --config=ci bazel-bin)/bpf/runqlat.bpf.o"
+          test_bin="$(bazel info --config=ci bazel-bin)/cgroup-signals/internal/runqlat/runqlat_test_/runqlat_test"
+          : >bench.txt
+          for round in 1 2 3; do
+            for which in base head; do
+              obj="${base_obj}"; [ "${which}" = head ] && obj="${head_obj}"
+              RUNQLAT_BENCH_OBJECT="${obj}" RUNQLAT_BENCH_SECONDS=10 \
+                sudo -E "${test_bin}" -test.run '^TestMeasure$' -test.v 2>&1 \
+                | grep '^BENCH ' | sed "s|object=[^ ]*|object=${which}|" | tee -a bench.txt
+            done
+          done
+          python3 - "$(uname -r)" "$(nproc)" <<'PY' | tee -a "${GITHUB_STEP_SUMMARY}"
+          import statistics, sys
+          rows = {}
+          for line in open("bench.txt"):
+              kv = dict(f.split("=", 1) for f in line.split()[1:])
+              rows.setdefault((kv["prog"], kv["object"]), []).append(kv)
+          print(f"### run-queue programs, base vs head ({sys.argv[1]}, {sys.argv[2]} CPUs)\n")
+          print("| program | object | median ns/run | median runs/s | verified insns | xlated insns |")
+          print("| --- | --- | --- | --- | --- | --- |")
+          for prog in ("sched_wakeup", "sched_wakeup_new", "sched_switch"):
+              for which in ("base", "head"):
+                  r = rows.get((prog, which))
+                  if not r:
+                      continue
+                  ns = statistics.median(float(x["ns_per_run"]) for x in r)
+                  rs = statistics.median(float(x["runs_per_s"]) for x in r)
+                  print(f"| {prog} | {which} | {ns:.1f} | {rs:.0f} | {r[0]['verified_insns']} | {r[0]['xlated_insns']} |")
+          PY
 
   # The single check a ruleset should require. A required status check is
   # matched by check-run name, so requiring the jobs themselves ties the

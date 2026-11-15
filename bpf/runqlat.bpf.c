@@ -20,7 +20,10 @@
 // pid namespace; a task's cgroup is resolved through its ancestors, and what
 // is under no tracked cgroup counts in index 0 ("other"); the histogram is
 // per CPU, so the hot path takes no atomic; and it records the sum of the
-// delays, for a Prometheus histogram's _sum.
+// delays, for a Prometheus histogram's _sum. The per-event cost is kept low by
+// keeping what is per task in task local storage (the enqueue time and the
+// resolved histogram index) instead of hash maps, and by resolving the cgroup
+// only at the switch that records a delay.
 #include "vmlinux.h"
 
 #include <bpf_core_read.h>
@@ -35,15 +38,37 @@
 
 #define TASK_RUNNING 0
 
-/* When each runnable task became runnable, by tid. A task is in here from its
- * wakeup (or preemption) to the switch that puts it on a CPU, which always
- * comes: a task cannot exit without running. */
+/* Per task: when it became runnable, and the histogram index it counted in
+ * last time, with the cgroup and the generation that index was resolved for.
+ * Task local storage: no hash lookup on the hot path, and the kernel frees the
+ * entry with the task, so there is no table to fill up or to clean. A task is
+ * runnable from its wakeup (or preemption) to the switch that puts it on a
+ * CPU, which always comes: a task cannot exit without running. */
+struct task_info {
+	__u64 ts;   /* ktime when it became runnable; 0: not waiting */
+	__u64 cgid; /* the cgroup idx was resolved for; 0: never */
+	__u32 idx;
+	__u32 gen;  /* the value of gen when idx was resolved */
+};
+
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct task_info);
+} tasks SEC(".maps");
+
+/* The generation of the tracked map: the loader adds one after every change to
+ * it (a cgroup tracked or dropped), so a resolution remembered in tasks is
+ * used only while nothing it depended on can have changed. The program reads
+ * it BEFORE it resolves, so a change racing a resolution makes the remembered
+ * result stale, never wrong. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
 	__type(key, __u32);
-	__type(value, __u64);
-} start SEC(".maps");
+	__type(value, __u32);
+} gen SEC(".maps");
 
 /* cgroup id -> histogram index, filled by the loader with the tracked
  * cgroups. */
@@ -111,15 +136,13 @@ static __always_inline long task_state(struct task_struct *t)
 	return t->__state;
 }
 
-static __always_inline void enqueue(struct task_struct *t)
+static __always_inline void enqueue(struct task_struct *t, __u64 now)
 {
-	__u32 pid = t->pid;
-	__u64 ts;
+	struct task_info *ti;
 
-	if (!pid) /* the idle tasks */
-		return;
-	ts = bpf_ktime_get_ns();
-	bpf_map_update_elem(&start, &pid, &ts, BPF_ANY);
+	ti = bpf_task_storage_get(&tasks, t, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (ti)
+		ti->ts = now;
 }
 
 static __always_inline __u32 lookup(__u64 id)
@@ -129,11 +152,10 @@ static __always_inline __u32 lookup(__u64 id)
 	return idx ? *idx : 0;
 }
 
-/* The histogram index of the cgroup the task is in: of the cgroup itself if it
+/* The histogram index of the cgroup kn: of the cgroup itself if it
  * is tracked, else of its nearest tracked ancestor, else 0. */
-static __always_inline __u32 resolve(struct task_struct *t)
+static __always_inline __u32 resolve(struct kernfs_node *kn)
 {
-	struct kernfs_node *kn = t->cgroups->dfl_cgrp->kn;
 	__u64 leaf, id;
 	__u32 *idx, found;
 	int i;
@@ -175,10 +197,21 @@ static __always_inline __u32 log2l(__u64 v)
 	return r;
 }
 
-static __always_inline void record(struct task_struct *next, __u64 delta_ns)
+/* ns / 1000. BPF has no 64-bit multiply-high, so clang leaves a 64-bit
+ * division by a constant as a real division; for a 32-bit value the exact
+ * reciprocal multiplication is three instructions (x * 274877907 >> 38 is
+ * exact for every x below 2^32). Only delays of 4.3 s or more take the
+ * division. */
+static __always_inline __u64 ns_to_us(__u64 ns)
 {
-	__u32 idx = resolve(next);
-	__u32 slot = log2l(delta_ns / 1000);
+	if (ns >> 32)
+		return ns / 1000;
+	return (ns * 274877907ULL) >> 38;
+}
+
+static __always_inline void record(__u32 idx, __u64 delta_ns)
+{
+	__u32 slot = log2l(ns_to_us(delta_ns));
 	struct hist *h;
 
 	if (idx >= MAX_CGROUPS)
@@ -196,46 +229,72 @@ static __always_inline void record(struct task_struct *next, __u64 delta_ns)
 SEC("tp_btf/sched_wakeup")
 int BPF_PROG(sched_wakeup, struct task_struct *p)
 {
-	enqueue(p);
+	enqueue(p, bpf_ktime_get_ns());
 	return 0;
 }
 
 SEC("tp_btf/sched_wakeup_new")
 int BPF_PROG(sched_wakeup_new, struct task_struct *p)
 {
-	enqueue(p);
+	enqueue(p, bpf_ktime_get_ns());
 	return 0;
+}
+
+static __noinline void missed_one(void)
+{
+	__u32 zero = 0;
+	__u64 *m = bpf_map_lookup_elem(&missed, &zero);
+
+	if (m)
+		(*m)++;
 }
 
 SEC("tp_btf/sched_switch")
 int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_struct *next)
 {
-	__u32 pid = next->pid;
-	__u64 *tsp;
+	__u64 now = bpf_ktime_get_ns();
+	struct task_info *ti;
+	__u32 zero = 0, *g, gv, idx;
+	struct kernfs_node *kn;
 	__s64 delta;
+	__u64 cgid;
 
 	/* Back on the run queue: preempted (the scheduler leaves a preempted
 	 * task runnable whatever its state says, which can already be a sleep
-	 * state it was about to enter), or it yielded and is still runnable. */
-	if (preempt || task_state(prev) == TASK_RUNNING)
-		enqueue(prev);
+	 * state it was about to enter), or it yielded and is still runnable.
+	 * The idle task (pid 0) is not timed; it also shows as preempted. */
+	if (prev->pid && (preempt || task_state(prev) == TASK_RUNNING))
+		enqueue(prev, now);
 
-	if (!pid)
+	if (!next->pid)
 		return 0;
-	tsp = bpf_map_lookup_elem(&start, &pid);
-	if (!tsp) {
-		__u32 zero = 0;
-		__u64 *m = bpf_map_lookup_elem(&missed, &zero);
-
-		if (m)
-			(*m)++;
+	ti = bpf_task_storage_get(&tasks, next, 0, 0);
+	if (!ti || !ti->ts) {
+		missed_one();
 		return 0;
 	}
-	delta = bpf_ktime_get_ns() - *tsp;
-	bpf_map_delete_elem(&start, &pid);
+	delta = now - ti->ts;
+	ti->ts = 0;
 	if (delta < 0)
 		return 0;
-	record(next, delta);
+
+	/* The histogram index: remembered per task while the task is in the
+	 * same cgroup and the tracked set has not changed since. */
+	g = bpf_map_lookup_elem(&gen, &zero);
+	if (!g)
+		return 0;
+	gv = *g; /* before resolving, once */
+	kn = next->cgroups->dfl_cgrp->kn;
+	cgid = kn ? kn->id : 0;
+	if (cgid && ti->cgid == cgid && ti->gen == gv) {
+		idx = ti->idx;
+	} else {
+		idx = resolve(kn);
+		ti->cgid = cgid;
+		ti->idx = idx;
+		ti->gen = gv;
+	}
+	record(idx, delta);
 	return 0;
 }
 
