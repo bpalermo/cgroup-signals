@@ -303,7 +303,7 @@ jobs:
               out="$(sudo env RUNQLAT_BENCH_OBJECT="${obj}" RUNQLAT_BENCH_SECONDS=10 \
                 "${test_bin}" -test.run '^TestMeasure$' -test.v 2>&1)" || { echo "${out}"; exit 1; }
               echo "${out}" | grep -v '^BENCH ' || true
-              grep '^BENCH ' <<<"${out}" | sed "s|object=[^ ]*|object=${which}|" | tee -a bench.txt
+              grep '^BENCH ' <<<"${out}" | sed "/object=noop/! s|object=[^ ]*|object=${which}|" | tee -a bench.txt
             done
           done
           python3 - "$(uname -r)" "$(nproc)" <<'PY' | tee -a "${GITHUB_STEP_SUMMARY}"
@@ -315,6 +315,11 @@ jobs:
           print(f"### run-queue programs, base vs head ({sys.argv[1]}, {sys.argv[2]} CPUs)\n")
           print("| program | object | median ns/run | median runs/s | verified insns | xlated insns |")
           print("| --- | --- | --- | --- | --- | --- |")
+          for prog in ("noop_sched_wakeup", "noop_sched_switch"):
+              r = rows.get((prog, "noop"))
+              if r:
+                  ns = statistics.median(float(x["ns_per_run"]) for x in r)
+                  print(f"| {prog} (the kernel's own overhead) | - | {ns:.1f} | - | - | - |")
           for prog in ("sched_wakeup", "sched_wakeup_new", "sched_switch"):
               for which in ("base", "head"):
                   r = rows.get((prog, which))

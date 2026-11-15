@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
@@ -58,6 +59,8 @@ func TestMeasure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stats.Close()
+
+	measureNoop(t, secs)
 
 	names := []string{"sched_wakeup", "sched_wakeup_new", "sched_switch"}
 	for _, n := range names {
@@ -166,4 +169,49 @@ func generateLoad(d time.Duration) {
 	time.Sleep(d)
 	close(stop)
 	wg.Wait()
+}
+
+// measureNoop prints the cost of a program that does nothing on each of the
+// two tracepoints: the kernel's own overhead of running a tp_btf program with
+// run statistics on (two clock reads, the trampoline), which every number
+// above includes. Subtract it to compare a program's own work.
+func measureNoop(t *testing.T, secs int) {
+	t.Helper()
+	for _, name := range []string{"sched_wakeup", "sched_switch"} {
+		prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+			Name:       "noop",
+			Type:       ebpf.Tracing,
+			AttachType: ebpf.AttachTraceRawTp,
+			AttachTo:   name,
+			License:    "GPL",
+			Instructions: asm.Instructions{
+				asm.Mov.Imm(asm.R0, 0),
+				asm.Return(),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := prog.Stats()
+		if err != nil {
+			t.Fatal(err)
+		}
+		generateLoad(time.Duration(secs) * time.Second / 2)
+		after, err := prog.Stats()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = l.Close()
+		_ = prog.Close()
+		runs := after.RunCount - before.RunCount
+		if runs == 0 {
+			continue
+		}
+		fmt.Printf("BENCH object=noop prog=noop_%s runs_per_s=%.0f ns_per_run=%.1f verified_insns=0 xlated_insns=2\n",
+			name, float64(runs)/(float64(secs)/2), float64((after.Runtime-before.Runtime).Nanoseconds())/float64(runs))
+	}
 }
