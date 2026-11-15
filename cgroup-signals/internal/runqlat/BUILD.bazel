@@ -32,13 +32,16 @@ go_library(
 go_test(
     name = "runqlat_test",
     srcs = [
+        "cache_test.go",
         "collector_test.go",
+        "measure_test.go",
         "runqlat_test.go",
     ],
     embed = [":runqlat"],
     deps = [
         "@com_github_cilium_ebpf//:ebpf",
         "@com_github_cilium_ebpf//btf",
+        "@com_github_cilium_ebpf//link",
         "@com_github_prometheus_client_golang//prometheus",
         "@com_github_prometheus_client_model//go",
         "@org_golang_x_sys//unix",

@@ -37,7 +37,7 @@ func TestObject(t *testing.T) {
 		}
 	}
 	for name, typ := range map[string]ebpf.MapType{
-		"start": ebpf.Hash, "tracked": ebpf.Hash, "below": ebpf.LRUHash,
+		"tracked": ebpf.Hash, "below": ebpf.LRUHash, "tasks": ebpf.TaskStorage, "gen": ebpf.Array,
 		"hists": ebpf.PerCPUArray, "missed": ebpf.PerCPUArray,
 	} {
 		m := spec.Maps[name]

@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
@@ -94,6 +95,7 @@ type Store interface {
 // objects are the maps and programs of the object, by their names in the C.
 type objects struct {
 	Tracked *ebpf.Map `ebpf:"tracked"`
+	Gen     *ebpf.Map `ebpf:"gen"`
 	Hists   *ebpf.Map `ebpf:"hists"`
 	Missed  *ebpf.Map `ebpf:"missed"`
 
@@ -109,7 +111,7 @@ func (o *objects) close() error {
 			errs = append(errs, p.Close())
 		}
 	}
-	for _, m := range []*ebpf.Map{o.Tracked, o.Hists, o.Missed} {
+	for _, m := range []*ebpf.Map{o.Tracked, o.Gen, o.Hists, o.Missed} {
 		if m != nil {
 			errs = append(errs, m.Close())
 		}
@@ -122,6 +124,11 @@ type Program struct {
 	objs  objects
 	links []link.Link
 	cpus  int
+
+	// genMu orders the bumps of the generation, which the program reads to
+	// know whether what it remembered about a task is still true.
+	genMu sync.Mutex
+	gen   uint32
 }
 
 // Check returns an error that says what is missing, if this host cannot run
@@ -194,18 +201,50 @@ func (p *Program) Close() error {
 	return errors.Join(errs...)
 }
 
-// SetTracked implements Store.
+// bumpGen advances the generation of the tracked set. The program remembers,
+// per task and per container cgroup, the histogram index it resolved, and
+// trusts it only while the generation is the one it was resolved under; so
+// this runs AFTER every change to the tracked map, and the next switch
+// resolves again. It retries, because a change whose bump is lost leaves what
+// the program remembered trusted.
+func (p *Program) bumpGen() error {
+	p.genMu.Lock()
+	defer p.genMu.Unlock()
+	p.gen++
+	var err error
+	for range 3 {
+		if err = p.objs.Gen.Put(uint32(0), p.gen); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("advancing the generation: %w", err)
+}
+
+// SetTracked implements Store. If it returns an error the cgroup is not
+// tracked: a change whose generation bump failed is undone, so the caller can
+// hand the index to another cgroup.
 func (p *Program) SetTracked(id uint64, idx uint32) error {
-	return p.objs.Tracked.Put(id, idx)
+	if err := p.objs.Tracked.Put(id, idx); err != nil {
+		return err
+	}
+	err := p.bumpGen()
+	if err == nil {
+		return nil
+	}
+	if derr := p.objs.Tracked.Delete(id); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+		derr = fmt.Errorf("undoing the change: %w", derr)
+		err = errors.Join(err, derr)
+	}
+	return errors.Join(err, p.bumpGen())
 }
 
 // DeleteTracked implements Store.
 func (p *Program) DeleteTracked(id uint64) error {
 	err := p.objs.Tracked.Delete(id)
 	if errors.Is(err, ebpf.ErrKeyNotExist) {
-		return nil
+		err = nil
 	}
-	return err
+	return errors.Join(err, p.bumpGen())
 }
 
 // Hist implements Store.

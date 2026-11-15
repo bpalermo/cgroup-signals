@@ -63,6 +63,15 @@ enum bpf_map_type {
 	BPF_MAP_TYPE_PERCPU_HASH = 5,
 	BPF_MAP_TYPE_PERCPU_ARRAY = 6,
 	BPF_MAP_TYPE_LRU_HASH = 9,
+	BPF_MAP_TYPE_TASK_STORAGE = 29,
+};
+
+enum {
+	BPF_F_NO_PREALLOC = 1,
+};
+
+enum {
+	BPF_LOCAL_STORAGE_GET_F_CREATE = 1,
 };
 
 enum {

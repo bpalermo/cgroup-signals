@@ -104,7 +104,15 @@ How it works, because the C and the Go depend on each other:
   the `tracked` map (cgroup id to index), which the loader fills from the
   cgroups it discovers; a task's cgroup is looked up, then its ancestors' up to
   `MAX_DEPTH`, and what is under none counts in index 0 ("other"). A
-  container's resolution is remembered in the LRU map `below` (hits only).
+  container's resolution is remembered in the LRU map `below` (hits only, tagged with `gen`).
+  Each task also remembers its own: the enqueue time and the resolved index
+  live in task local storage (`tasks`), valid while the task's cgroup id is the
+  same and the `gen` array's value equals the one stored with it. The loader
+  (`Program.SetTracked`/`DeleteTracked`) adds one to `gen` AFTER every change
+  to `tracked`; the program reads `gen` BEFORE it resolves. Keep that order,
+  or a reused index or a newly tracked cgroup is counted wrong
+  (`TestCacheInvalidation`). `TestMeasure` (env `RUNQLAT_BENCH_OBJECT`) is the
+  cost benchmark the `bpf-load` job runs on the base and head objects.
   `MAX_SLOTS` and `MAX_CGROUPS` are in `bpf/runqlat.h` and again in
   `runqlat.go`; `TestObject` fails if the struct sizes drift apart.
 - The cgroup id is the inode number of the cgroup's directory (64-bit kernels),
