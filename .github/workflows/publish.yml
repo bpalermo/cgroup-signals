@@ -1,0 +1,53 @@
+name: publish
+
+# main publishes the multi-arch image to ghcr.io/bpalermo/cgroup-signals under
+# the mutable `dev` tag and the immutable `dev-<commit>` tag. Nothing else
+# publishes: no release is created here.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+# Keyed by branch, not by commit, so publications are serialized: the `dev` tag
+# is mutable, and two runs publishing at once could leave it on the older
+# commit. A commit queued behind another is cancelled and publishes nothing,
+# which is visible; a stale `dev` is not.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # workspace_status.sh runs `git describe --tags`.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          disk-cache: publish
+          repository-cache: true
+          cache-save: false
+
+      - name: bazel test //...
+        run: bazel test --config=ci //...
+
+      # image_push (rules_img) reads the Docker config this writes. The
+      # registry host is bazel/registry.bzl's IMAGE_REGISTRY.
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the multi-arch image
+        run: bazel run --config=ci //cgroup-signals:image_push
