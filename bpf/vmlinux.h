@@ -15,7 +15,8 @@
  * Fields, as of Linux 6.8 and 6.18 (checked with
  * `bpftool btf dump file /sys/kernel/btf/vmlinux | grep -A.. "STRUCT 'task_struct'"`):
  *   task_struct.__state (int; `state`, a long, before 5.14), .pid, .cgroups
- *   css_set.dfl_cgrp, cgroup.kn, kernfs_node.parent, kernfs_node.id (u64 since 5.5)
+ *   css_set.dfl_cgrp, cgroup.kn, kernfs_node.id (u64 since 5.5), and
+ *   kernfs_node.parent, which is __parent from 6.15 (the program has both)
  * The load test (TestLoad, needs root) fails if the running kernel lacks one.
  */
 #ifndef __VMLINUX_H__

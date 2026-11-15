@@ -254,7 +254,7 @@ func KernelHasFields(kernel *btf.Spec) []string {
 		{"task_struct", []string{"cgroups"}},
 		{"css_set", []string{"dfl_cgrp"}},
 		{"cgroup", []string{"kn"}},
-		{"kernfs_node", []string{"parent"}},
+		{"kernfs_node", []string{"parent", "__parent"}},
 		{"kernfs_node", []string{"id"}},
 	} {
 		var st *btf.Struct

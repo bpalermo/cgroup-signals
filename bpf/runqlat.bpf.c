@@ -87,6 +87,21 @@ struct task_struct___old {
 	long state;
 } __attribute__((preserve_access_index));
 
+/* kernfs_node.parent is __parent since Linux 6.15 (it is read through
+ * kernfs_parent(), under RCU). */
+struct kernfs_node___new {
+	struct kernfs_node___new *__parent;
+} __attribute__((preserve_access_index));
+
+static __always_inline struct kernfs_node *kn_parent(struct kernfs_node *kn)
+{
+	struct kernfs_node___new *n = (void *)kn;
+
+	if (bpf_core_field_exists(n->__parent))
+		return (struct kernfs_node *)n->__parent;
+	return kn->parent;
+}
+
 static __always_inline long task_state(struct task_struct *t)
 {
 	struct task_struct___old *old = (void *)t;
@@ -133,7 +148,7 @@ static __always_inline __u32 resolve(struct task_struct *t)
 	if (found)
 		return found;
 	for (i = 0; i < MAX_DEPTH; i++) {
-		kn = kn->parent;
+		kn = kn_parent(kn);
 		if (!kn)
 			return 0;
 		id = kn->id;
