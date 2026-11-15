@@ -145,6 +145,12 @@ runqueue:
   # does not, set Unconfined here rather than adding capabilities.
   seccompProfile: RuntimeDefault
 
+  # Scheduling of the run-queue pods only. Empty (the default) means the
+  # top-level nodeSelector / affinity, the exporter's. Set to run the eBPF
+  # DaemonSet on fewer nodes than the exporter, e.g. a one-node canary.
+  nodeSelector: {}
+  affinity: {}
+
   # /healthz only, and unlike the exporter's /metrics a GET of /metrics is
   # harmless here.
   livenessProbe:

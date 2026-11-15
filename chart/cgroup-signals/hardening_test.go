@@ -323,8 +323,53 @@ func TestRunqueueOptions(t *testing.T) {
 	if get(c, "securityContext", "privileged") != nil {
 		t.Error("no option makes the run-queue container privileged")
 	}
+	if ns, _ := get(ds, "spec", "template", "spec", "nodeSelector").(map[string]any); len(ns) != 1 || ns["node"] != "n1" {
+		t.Errorf("runqueue.nodeSelector replaces the top-level one for the run-queue pod: %v", ns)
+	}
+	if exp := sets["cgroup-signals"]; exp == nil || get(exp, "spec", "template", "spec", "nodeSelector", "zone") != "a" ||
+		get(exp, "spec", "template", "spec", "nodeSelector", "node") != nil {
+		t.Error("the exporter keeps the top-level nodeSelector")
+	}
 	ports, _ := c["ports"].([]any)
 	if len(ports) != 1 || get(ports[0], "containerPort") != 9200 || get(c, "livenessProbe", "httpGet", "port") != "runqueue" {
 		t.Error("the port follows runqueue.port, and the probes use its name")
+	}
+}
+
+// affinityKey is the key of the first matchExpression of a required node
+// affinity: enough to tell the fixtures' "top" and "rq" affinities apart.
+func affinityKey(ds object) any {
+	terms, _ := get(ds, "spec", "template", "spec", "affinity", "nodeAffinity",
+		"requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms").([]any)
+	if len(terms) == 0 {
+		return nil
+	}
+	exprs, _ := get(terms[0], "matchExpressions").([]any)
+	if len(exprs) == 0 {
+		return nil
+	}
+	return get(exprs[0], "key")
+}
+
+func TestRunqueueScheduling(t *testing.T) {
+	// Overrides empty: the run-queue pod inherits the top-level scheduling.
+	sets := daemonSets(t, "rendered_runqueue_inherit.yaml")
+	for _, name := range []string{"cgroup-signals", "cgroup-signals-runqueue"} {
+		ds := sets[name]
+		if ds == nil {
+			t.Fatalf("no %s DaemonSet in %v", name, sets)
+		}
+		if get(ds, "spec", "template", "spec", "nodeSelector", "zone") != "a" || affinityKey(ds) != "top" {
+			t.Errorf("%s: want the top-level nodeSelector and affinity", name)
+		}
+	}
+
+	// Overrides set: the run-queue pod takes its own, the exporter keeps the top-level ones.
+	sets = daemonSets(t, "rendered_runqueue_options.yaml")
+	if got := affinityKey(sets["cgroup-signals-runqueue"]); got != "rq" {
+		t.Errorf("runqueue.affinity replaces the top-level one for the run-queue pod, have %v", got)
+	}
+	if got := affinityKey(sets["cgroup-signals"]); got != "top" {
+		t.Errorf("the exporter keeps the top-level affinity, have %v", got)
 	}
 }

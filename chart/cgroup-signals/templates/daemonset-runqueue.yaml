@@ -91,11 +91,11 @@ spec:
           hostPath:
             path: /sys/fs/cgroup
             type: Directory
-      {{- with .Values.nodeSelector }}
+      {{- with (.Values.runqueue.nodeSelector | default .Values.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- with (.Values.runqueue.affinity | default .Values.affinity) }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
