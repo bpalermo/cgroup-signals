@@ -214,9 +214,10 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 	__u64 *tsp;
 	__s64 delta;
 
-	/* Still runnable: it was preempted (or yielded) and is back on the run
-	 * queue. */
-	if (task_state(prev) == TASK_RUNNING)
+	/* Back on the run queue: preempted (the scheduler leaves a preempted
+	 * task runnable whatever its state says, which can already be a sleep
+	 * state it was about to enter), or it yielded and is still runnable. */
+	if (preempt || task_state(prev) == TASK_RUNNING)
 		enqueue(prev);
 
 	if (!pid)

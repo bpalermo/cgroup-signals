@@ -12,7 +12,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "cgroup-signals.runqueueName" -}}
-{{- printf "%s-runqueue" (include "cgroup-signals.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- /* 54 + len("-runqueue") = 63: truncate the base, not the suffix */ -}}
+{{- printf "%s-runqueue" (include "cgroup-signals.fullname" . | trunc 54 | trimSuffix "-") -}}
 {{- end -}}
 
 {{- /* Not the exporter's name: the two DaemonSets' selectors must not match each other's pods. */ -}}
