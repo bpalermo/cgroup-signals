@@ -6,6 +6,8 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 exports_files([
     "registry.bzl",
     "workspace_status.sh",
+    # Run by the publish workflow, between building the chart and pushing it.
+    "verify-chart.sh",
 ])
 
 # For the shellcheck aspect (--config=lint): the workspace status script is
@@ -30,4 +32,13 @@ sh_test(
     size = "small",
     srcs = ["ci_impacted_targets_test.sh"],
     data = ["ci-impacted-targets.sh"],
+)
+
+# What the publish workflow checks on the packaged chart before it pushes.
+sh_test(
+    name = "verify_chart_test",
+    size = "small",
+    srcs = ["verify_chart_test.sh"],
+    args = ["$(rootpath verify-chart.sh)"],
+    data = ["verify-chart.sh"],
 )

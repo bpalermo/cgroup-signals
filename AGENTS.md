@@ -108,6 +108,16 @@ TODO, to decide when the first program is written:
 - The version a binary reports comes from `bazel/workspace_status.sh`: `VERSION`
   is the release being worked towards, and a commit tagged `v<VERSION>` is that
   release; any other commit is a snapshot.
+- The Helm chart is `chart/cgroup-signals` (rules_helm, helm pinned in
+  `MODULE.bazel` and `.bazelrc`). `Chart.yaml` and `values.yaml` carry stamp
+  placeholders (`{STABLE_CHART_VERSION}`, `{@//cgroup-signals:image_push.digest}`)
+  replaced at package time, so the chart pins the image of its own commit by
+  digest. `hardening_test.go` checks the rendered DaemonSet (the defaults and
+  the options), `render_guards_test.sh` that the `fail` guards refuse, and
+  `helm_lint_test`/`helm_template_test` lint and render it. The publish job runs
+  `bazel/verify-chart.sh` before `...push_registry`; keep the chart's pushed
+  version and the README in step with `bazel/workspace_status.sh`. Do not add a
+  probe on `/metrics` (a GET resets every memory peak).
 - Only CI publishes (`.github/workflows/publish.yml`, on `main`). Never push an
   image or create a release by hand.
 

@@ -2,7 +2,11 @@ name: publish
 
 # main publishes the multi-arch image to ghcr.io/bpalermo/cgroup-signals under
 # the mutable `dev` tag and the immutable `dev-<commit>` tag. Nothing else
-# publishes: no release is created here.
+# publishes: no release is created here. The Helm chart follows the image, as
+# oci://ghcr.io/bpalermo/charts/cgroup-signals at the version
+# bazel/workspace_status.sh stamps (0.1.0-dev.<commit time>.g<short commit>),
+# pinning the image this same run pushed by digest. A chart version is never
+# moved.
 on:
   push:
     branches: [main]
@@ -51,3 +55,63 @@ jobs:
 
       - name: Push the multi-arch image
         run: bazel run --config=ci //cgroup-signals:image_push
+
+      # The digest comes from the build, not from resolving a mutable tag after
+      # the push. It is what the chart pins, so the chart is checked against it,
+      # and against the registry, before anything is pushed.
+      - name: Record the pushed image digest
+        id: image
+        run: |
+          set -euo pipefail
+          # With a warm disk cache Bazel does not write a cached output it was
+          # not asked for, and the push never asks for the digest file.
+          bazel build --config=ci //cgroup-signals:image_index
+          index_file="$(bazel cquery --config=ci //cgroup-signals:image_index --output=files 2>/dev/null \
+            | grep -E '_index\.json$' | head -1)"
+          digest_file="${index_file%_index.json}_digest"
+          if [ -z "${index_file}" ] || [ ! -s "${digest_file}" ]; then
+            echo "::error::could not find the image index digest produced by the build" >&2
+            exit 1
+          fi
+          digest="$(cat "${digest_file}")"
+          case "${digest}" in
+            sha256:*) ;;
+            *) echo "::error::unexpected digest ${digest}" >&2; exit 1 ;;
+          esac
+          # The registry agrees: the commit's tag resolves to that digest.
+          pushed="$(docker buildx imagetools inspect \
+            "ghcr.io/bpalermo/cgroup-signals:dev-${GITHUB_SHA}" --format '{{.Manifest.Digest}}')"
+          if [ "${pushed}" != "${digest}" ]; then
+            echo "::error::dev-${GITHUB_SHA} is ${pushed} in the registry, the build produced ${digest}" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
+          echo "image: \`ghcr.io/bpalermo/cgroup-signals@${digest}\`" >>"${GITHUB_STEP_SUMMARY}"
+
+      # The chart, after the image it pins. Packaged first and verified: the
+      # version must be this commit's and the pinned digest the one just
+      # pushed, because a pushed version is never moved.
+      - name: Package and verify the chart
+        id: chart
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          bazel build --config=ci //chart/cgroup-signals:cgroup-signals
+          chart="$(bazel cquery --config=ci //chart/cgroup-signals:cgroup-signals --output=files 2>/dev/null | grep -E '\.tgz$' | head -1)"
+          version="$(awk '$1 == "STABLE_CHART_VERSION" { print $2 }' bazel-out/stable-status.txt)"
+          [ -n "${version}" ] || { echo "::error::no STABLE_CHART_VERSION in the stable status" >&2; exit 1; }
+          bazel/verify-chart.sh "${chart}" "${DIGEST}" "${version}" "${GITHUB_SHA}"
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+
+      # GHCR, with the login above: helm falls back to Docker's credentials.
+      # The target is registry_url + the chart's name.
+      - name: Push the chart
+        env:
+          VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          set -euo pipefail
+          bazel run --config=ci //chart/cgroup-signals:cgroup-signals.push_registry
+          ref="oci://ghcr.io/bpalermo/charts/cgroup-signals --version ${VERSION}"
+          echo "pushed chart ${ref}"
+          echo "chart: \`${ref}\`" >>"${GITHUB_STEP_SUMMARY}"
