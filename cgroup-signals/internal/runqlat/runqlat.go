@@ -147,6 +147,11 @@ func Check() error {
 // and CAP_PERFMON, and Linux 5.11 or later (older kernels charge the maps
 // against RLIMIT_MEMLOCK, which Load does not raise).
 func Load(maxCgroups int) (*Program, error) {
+	return load(maxCgroups, tidSlots())
+}
+
+// load is Load with the size of the per-thread array given.
+func load(maxCgroups int, tids uint32) (*Program, error) {
 	if maxCgroups < 1 || maxCgroups >= MaxCgroups {
 		return nil, fmt.Errorf("max tracked cgroups %d is outside 1..%d", maxCgroups, MaxCgroups-1)
 	}
@@ -159,7 +164,7 @@ func Load(maxCgroups int) (*Program, error) {
 	}
 	spec.Maps["hists"].MaxEntries = uint32(maxCgroups) + 1
 	spec.Maps["tracked"].MaxEntries = uint32(maxCgroups)
-	spec.Maps["tids"].MaxEntries = tidSlots()
+	spec.Maps["tids"].MaxEntries = tids
 
 	p := &Program{}
 	if err := spec.LoadAndAssign(&p.objs, nil); err != nil {
@@ -183,16 +188,20 @@ func Load(maxCgroups int) (*Program, error) {
 	return p, nil
 }
 
-// maxTidSlots caps the per-thread array (32 bytes a slot): a kernel with a
-// larger pid_max (up to 4194304) has its highest tids go untimed, counted in
-// missed, rather than cost more memory.
+// maxTidSlots caps the per-thread array (32 bytes a slot, 32 MiB at the cap):
+// on a kernel with a larger pid_max (up to 4194304) the tids above it use the
+// program's LRU hash, slower but just as exact.
 const maxTidSlots = 1 << 20
 
 // tidSlots is the size of the per-thread array: the kernel's pid_max, which no
-// tid reaches, within [32768, maxTidSlots].
+// tid reaches, within [32768, maxtidSlots].
 func tidSlots() uint32 {
+	return tidSlotsFor(os.ReadFile)
+}
+
+func tidSlotsFor(read func(string) ([]byte, error)) uint32 {
 	n := uint32(32768)
-	if b, err := os.ReadFile("/proc/sys/kernel/pid_max"); err == nil {
+	if b, err := read("/proc/sys/kernel/pid_max"); err == nil {
 		if v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32); err == nil {
 			n = uint32(min(max(v, 32768), maxTidSlots))
 		}

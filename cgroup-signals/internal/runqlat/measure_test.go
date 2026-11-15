@@ -44,6 +44,9 @@ func TestMeasure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if m := spec.Maps["tids"]; m != nil { // objects from before the tid array have none
+		m.MaxEntries = tidSlots()
+	}
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +80,27 @@ func TestMeasure(t *testing.T) {
 		}
 	}
 	generateLoad(time.Duration(secs) * time.Second)
+	// The load must have been attributed (to histogram 1, this cgroup), not
+	// skipped: a program that returns early would look cheap.
+	var perCPU []Hist
+	if err := coll.Maps["hists"].Lookup(uint32(1), &perCPU); err != nil {
+		t.Fatal(err)
+	}
+	var h Hist
+	for i := range perCPU {
+		h.add(&perCPU[i])
+	}
+	var missed uint64
+	var mc []uint64
+	if err := coll.Maps["missed"].Lookup(uint32(0), &mc); err == nil {
+		for _, v := range mc {
+			missed += v
+		}
+	}
+	fmt.Printf("BENCH-INFO attributed=%d missed=%d\n", h.Count(), missed)
+	if h.Count() == 0 {
+		t.Fatal("no delay was attributed to the load's cgroup: the benchmark measured nothing")
+	}
 	for _, n := range names {
 		after, err := coll.Programs[n].Stats()
 		if err != nil {

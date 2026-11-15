@@ -63,6 +63,17 @@ struct {
 	__type(value, struct task_info);
 } tids SEC(".maps");
 
+/* The tids the array does not reach (the loader caps it below a huge pid_max):
+ * the same record in an LRU hash, slower and rarely used, so that coverage
+ * does not depend on how high the kernel's PID allocator has climbed. The
+ * LRU evicts the entries of threads that are gone. */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u32);
+	__type(value, struct task_info);
+} tids_hi SEC(".maps");
+
 /* The generation of the tracked map: the loader adds one after every change to
  * it (a cgroup tracked or dropped), so a resolution remembered above is used
  * only while nothing it depended on can have changed. The program reads it
@@ -144,13 +155,30 @@ static __always_inline long task_state(struct task_struct *t)
 	return t->__state;
 }
 
+/* A tid beyond the array. */
+static __noinline void enqueue_hi(__u32 tid, __u64 now)
+{
+	struct task_info *ti = bpf_map_lookup_elem(&tids_hi, &tid);
+	struct task_info n = {};
+
+	if (ti) {
+		ti->ts = now;
+		return;
+	}
+	n.ts = now;
+	bpf_map_update_elem(&tids_hi, &tid, &n, BPF_ANY);
+}
+
 static __always_inline void enqueue(struct task_struct *t, __u64 now)
 {
 	__u32 tid = t->pid;
 	struct task_info *ti = bpf_map_lookup_elem(&tids, &tid);
 
-	if (ti)
+	if (ti) {
 		ti->ts = now;
+		return;
+	}
+	enqueue_hi(tid, now);
 }
 
 static __always_inline __u32 lookup(__u64 id)
@@ -286,6 +314,8 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 	if (!tid)
 		return 0;
 	ti = bpf_map_lookup_elem(&tids, &tid);
+	if (!ti)
+		ti = bpf_map_lookup_elem(&tids_hi, &tid);
 	if (!ti || !ti->ts) {
 		missed_one();
 		return 0;

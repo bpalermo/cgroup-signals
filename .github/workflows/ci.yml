@@ -261,9 +261,9 @@ jobs:
         run: |
           uname -r
           test_bin="$(bazel info --config=ci bazel-bin)/cgroup-signals/internal/runqlat/runqlat_test_/runqlat_test"
-          out="$(sudo "${test_bin}" -test.v -test.run '^(TestLoad|TestCacheInvalidation)$' 2>&1)" || { echo "${out}"; exit 1; }
+          out="$(sudo "${test_bin}" -test.v -test.run '^(TestLoad|TestCacheInvalidation|TestHighTids)$' 2>&1)" || { echo "${out}"; exit 1; }
           echo "${out}"
-          for t in TestLoad TestCacheInvalidation; do
+          for t in TestLoad TestCacheInvalidation TestHighTids; do
             grep -q -- "--- PASS: ${t}" <<<"${out}" || { echo "::error::${t} did not run and pass" >&2; exit 1; }
           done
 
