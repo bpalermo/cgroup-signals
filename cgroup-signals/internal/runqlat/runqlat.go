@@ -202,21 +202,39 @@ func (p *Program) Close() error {
 }
 
 // bumpGen advances the generation of the tracked set. The program remembers,
-// per task, the histogram index it resolved for the task's cgroup, and trusts
-// it only while the generation is the one it was resolved under; so this runs
-// AFTER every change to the tracked map, and a task's next switch resolves
-// again. It runs even when the change failed: a half-applied change is still a
-// change.
+// per task and per container cgroup, the histogram index it resolved, and
+// trusts it only while the generation is the one it was resolved under; so
+// this runs AFTER every change to the tracked map, and the next switch
+// resolves again. It retries, because a change whose bump is lost leaves what
+// the program remembered trusted.
 func (p *Program) bumpGen() error {
 	p.genMu.Lock()
 	defer p.genMu.Unlock()
 	p.gen++
-	return p.objs.Gen.Put(uint32(0), p.gen)
+	var err error
+	for range 3 {
+		if err = p.objs.Gen.Put(uint32(0), p.gen); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("advancing the generation: %w", err)
 }
 
-// SetTracked implements Store.
+// SetTracked implements Store. If it returns an error the cgroup is not
+// tracked: a change whose generation bump failed is undone, so the caller can
+// hand the index to another cgroup.
 func (p *Program) SetTracked(id uint64, idx uint32) error {
-	err := p.objs.Tracked.Put(id, idx)
+	if err := p.objs.Tracked.Put(id, idx); err != nil {
+		return err
+	}
+	err := p.bumpGen()
+	if err == nil {
+		return nil
+	}
+	if derr := p.objs.Tracked.Delete(id); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+		derr = fmt.Errorf("undoing the change: %w", derr)
+		err = errors.Join(err, derr)
+	}
 	return errors.Join(err, p.bumpGen())
 }
 

@@ -150,4 +150,28 @@ func TestCacheInvalidation(t *testing.T) {
 	if g := run(dirA); g[3] == 0 {
 		t.Errorf("after the cgroup was tracked: gained %v, want histogram 3", g)
 	}
+
+	// The same for a container below a tracked cgroup: its resolution is
+	// remembered per cgroup, not per task. A is tracked (3) from above; run
+	// in an untracked child of it, then drop A and give 3 to C.
+	child := filepath.Join(dirA, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(child) })
+	if g := run(child); g[3] == 0 {
+		t.Fatalf("in an untracked child of a tracked cgroup: gained %v, want histogram 3", g)
+	}
+	if err := p.DeleteTracked(idA); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Reset(3); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetTracked(idC, 3); err != nil {
+		t.Fatal(err)
+	}
+	if g := run(child); g[3] != 0 || g[Other] == 0 {
+		t.Errorf("below a dropped cgroup whose index was reused: gained %v, want other only (not 3)", g)
+	}
 }

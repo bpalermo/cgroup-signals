@@ -104,7 +104,7 @@ How it works, because the C and the Go depend on each other:
   the `tracked` map (cgroup id to index), which the loader fills from the
   cgroups it discovers; a task's cgroup is looked up, then its ancestors' up to
   `MAX_DEPTH`, and what is under none counts in index 0 ("other"). A
-  container's resolution is remembered in the LRU map `below` (hits only).
+  container's resolution is remembered in the LRU map `below` (hits only, tagged with `gen`).
   Each task also remembers its own: the enqueue time and the resolved index
   live in task local storage (`tasks`), valid while the task's cgroup id is the
   same and the `gen` array's value equals the one stored with it. The loader

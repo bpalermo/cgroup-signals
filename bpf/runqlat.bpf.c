@@ -82,12 +82,19 @@ struct {
 /* The cgroups below a tracked one, resolved by walking up once and remembered
  * here, so a container costs one lookup after its first switch. Only hits are
  * remembered: a cgroup the loader has not seen yet must resolve again as soon
- * as it has. Least-recently-used, so it needs no cleaning. */
+ * as it has. An entry is used only under the generation it was made in, so a
+ * dropped cgroup's index, or one given to another cgroup, is never served from
+ * here. Least-recently-used, so it needs no cleaning. */
+struct below_val {
+	__u32 idx;
+	__u32 gen;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 8192);
 	__type(key, __u64);
-	__type(value, __u32);
+	__type(value, struct below_val);
 } below SEC(".maps");
 
 /* The histograms, per CPU. The loader reads and sums them at each scrape. */
@@ -154,18 +161,19 @@ static __always_inline __u32 lookup(__u64 id)
 
 /* The histogram index of the cgroup kn: of the cgroup itself if it
  * is tracked, else of its nearest tracked ancestor, else 0. */
-static __always_inline __u32 resolve(struct kernfs_node *kn)
+static __always_inline __u32 resolve(struct kernfs_node *kn, __u32 gv)
 {
 	__u64 leaf, id;
-	__u32 *idx, found;
+	struct below_val *bv, nv;
+	__u32 found;
 	int i;
 
 	if (!kn)
 		return 0;
 	leaf = kn->id;
-	idx = bpf_map_lookup_elem(&below, &leaf);
-	if (idx)
-		return *idx;
+	bv = bpf_map_lookup_elem(&below, &leaf);
+	if (bv && bv->gen == gv)
+		return bv->idx;
 	found = lookup(leaf);
 	if (found)
 		return found;
@@ -176,7 +184,9 @@ static __always_inline __u32 resolve(struct kernfs_node *kn)
 		id = kn->id;
 		found = lookup(id);
 		if (found) {
-			bpf_map_update_elem(&below, &leaf, &found, BPF_ANY);
+			nv.idx = found;
+			nv.gen = gv;
+			bpf_map_update_elem(&below, &leaf, &nv, BPF_ANY);
 			return found;
 		}
 	}
@@ -289,7 +299,7 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 	if (cgid && ti->cgid == cgid && ti->gen == gv) {
 		idx = ti->idx;
 	} else {
-		idx = resolve(kn);
+		idx = resolve(kn, gv);
 		ti->cgid = cgid;
 		ti->idx = idx;
 		ti->gen = gv;
