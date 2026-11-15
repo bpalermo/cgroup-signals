@@ -18,6 +18,8 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/cilium/ebpf"
@@ -94,10 +96,10 @@ type Store interface {
 
 // objects are the maps and programs of the object, by their names in the C.
 type objects struct {
-	Tracked *ebpf.Map `ebpf:"tracked"`
-	Gen     *ebpf.Map `ebpf:"gen"`
-	Hists   *ebpf.Map `ebpf:"hists"`
-	Missed  *ebpf.Map `ebpf:"missed"`
+	Tracked *ebpf.Map      `ebpf:"tracked"`
+	Gen     *ebpf.Variable `ebpf:"tracked_gen"`
+	Hists   *ebpf.Map      `ebpf:"hists"`
+	Missed  *ebpf.Map      `ebpf:"missed"`
 
 	Wakeup    *ebpf.Program `ebpf:"sched_wakeup"`
 	WakeupNew *ebpf.Program `ebpf:"sched_wakeup_new"`
@@ -111,7 +113,7 @@ func (o *objects) close() error {
 			errs = append(errs, p.Close())
 		}
 	}
-	for _, m := range []*ebpf.Map{o.Tracked, o.Gen, o.Hists, o.Missed} {
+	for _, m := range []*ebpf.Map{o.Tracked, o.Hists, o.Missed} {
 		if m != nil {
 			errs = append(errs, m.Close())
 		}
@@ -157,6 +159,7 @@ func Load(maxCgroups int) (*Program, error) {
 	}
 	spec.Maps["hists"].MaxEntries = uint32(maxCgroups) + 1
 	spec.Maps["tracked"].MaxEntries = uint32(maxCgroups)
+	spec.Maps["tids"].MaxEntries = tidSlots()
 
 	p := &Program{}
 	if err := spec.LoadAndAssign(&p.objs, nil); err != nil {
@@ -178,6 +181,23 @@ func Load(maxCgroups int) (*Program, error) {
 		p.links = append(p.links, l)
 	}
 	return p, nil
+}
+
+// maxTidSlots caps the per-thread array (32 bytes a slot): a kernel with a
+// larger pid_max (up to 4194304) has its highest tids go untimed, counted in
+// missed, rather than cost more memory.
+const maxTidSlots = 1 << 20
+
+// tidSlots is the size of the per-thread array: the kernel's pid_max, which no
+// tid reaches, within [32768, maxTidSlots].
+func tidSlots() uint32 {
+	n := uint32(32768)
+	if b, err := os.ReadFile("/proc/sys/kernel/pid_max"); err == nil {
+		if v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32); err == nil {
+			n = uint32(min(max(v, 32768), maxTidSlots))
+		}
+	}
+	return n
 }
 
 func loadHint(err error) string {
@@ -213,7 +233,7 @@ func (p *Program) bumpGen() error {
 	p.gen++
 	var err error
 	for range 3 {
-		if err = p.objs.Gen.Put(uint32(0), p.gen); err == nil {
+		if err = p.objs.Gen.Set(p.gen); err == nil {
 			return nil
 		}
 	}

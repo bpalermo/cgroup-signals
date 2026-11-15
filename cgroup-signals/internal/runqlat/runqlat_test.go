@@ -37,13 +37,16 @@ func TestObject(t *testing.T) {
 		}
 	}
 	for name, typ := range map[string]ebpf.MapType{
-		"tracked": ebpf.Hash, "below": ebpf.LRUHash, "tasks": ebpf.TaskStorage, "gen": ebpf.Array,
+		"tracked": ebpf.Hash, "below": ebpf.LRUHash, "tids": ebpf.Array,
 		"hists": ebpf.PerCPUArray, "missed": ebpf.PerCPUArray,
 	} {
 		m := spec.Maps[name]
 		if m == nil || m.Type != typ {
 			t.Errorf("map %s: %v, want type %v", name, m, typ)
 		}
+	}
+	if m := spec.Maps["tids"]; m == nil || m.ValueSize != 32 {
+		t.Errorf("tids value size is %v, want 32 (one entry, half a cache line)", m)
 	}
 	// The Go and C sides of the histogram agree.
 	m := spec.Maps["hists"]
