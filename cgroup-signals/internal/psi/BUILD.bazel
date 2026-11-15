@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "psi",
+    srcs = [
+        "trigger.go",
+        "watcher.go",
+    ],
+    importpath = "github.com/bpalermo/cgroup-signals/cgroup-signals/internal/psi",
+    visibility = ["//cgroup-signals:__subpackages__"],
+    deps = ["@org_golang_x_sys//unix"],
+)
+
+go_test(
+    name = "psi_test",
+    srcs = ["psi_test.go"],
+    embed = [":psi"],
+    deps = ["@org_golang_x_sys//unix"],
+)

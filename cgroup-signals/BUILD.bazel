@@ -8,6 +8,9 @@ go_library(
     importpath = "github.com/bpalermo/cgroup-signals/cgroup-signals",
     visibility = ["//visibility:private"],
     deps = [
+        "//cgroup-signals/internal/cgroupfs",
+        "//cgroup-signals/internal/collector",
+        "//cgroup-signals/internal/psi",
         "//cgroup-signals/internal/server",
         "//common/version",
         "@com_github_prometheus_client_golang//prometheus",
@@ -38,8 +41,9 @@ go_image(
     path = "/cgroup-signals",
     registry = IMAGE_REGISTRY,
     repository = image_repository("cgroup-signals"),
-    # Root: the cgroup files (memory.peak, the PSI triggers) and the BPF
-    # programs need CAP_SYS_ADMIN/CAP_BPF, which the runtime grants the
-    # container's process only as uid 0 in a privileged DaemonSet.
+    # Root: the cgroup files it writes (memory.peak, the PSI triggers) are
+    # root's with mode 0644, sub-2 s PSI windows need CAP_SYS_RESOURCE and
+    # the BPF programs CAP_BPF, which the runtime grants the container's
+    # process only as uid 0 in a privileged DaemonSet.
     user = "0",
 )

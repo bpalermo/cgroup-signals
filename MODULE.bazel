@@ -35,7 +35,7 @@ go_sdk.nogo(nogo = "//:nogo")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-use_repo(go_deps, "co_honnef_go_tools", "com_github_prometheus_client_golang", "com_github_uudashr_gocognit")
+use_repo(go_deps, "co_honnef_go_tools", "com_github_prometheus_client_golang", "com_github_prometheus_client_model", "com_github_uudashr_gocognit", "org_golang_x_sys")
 
 # Container image base: distroless static on Debian 13, nonroot variant (user
 # 65532), pinned by index digest so a moving tag cannot change the image.
