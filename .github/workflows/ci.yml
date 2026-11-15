@@ -285,10 +285,16 @@ jobs:
         if: github.event_name == 'pull_request'
         continue-on-error: true
         run: |
-          head_obj="$(bazel info --config=ci bazel-bin)/bpf/runqlat.bpf.o"
+          # Copy each object out right after it is built: setup-bazel shares
+          # one output base between the two workspaces, so the second build
+          # replaces what bazel-bin holds.
+          (cd base && bazel build --config=ci //bpf:runqlat \
+            && cp "$(bazel info --config=ci bazel-bin)/bpf/runqlat.bpf.o" "${RUNNER_TEMP}/base.bpf.o")
           bazel build --config=ci //bpf:runqlat
-          (cd base && bazel build --config=ci //bpf:runqlat)
-          base_obj="$(cd base && bazel info --config=ci bazel-bin)/bpf/runqlat.bpf.o"
+          cp "$(bazel info --config=ci bazel-bin)/bpf/runqlat.bpf.o" "${RUNNER_TEMP}/head.bpf.o"
+          cmp -s "${RUNNER_TEMP}/base.bpf.o" "${RUNNER_TEMP}/head.bpf.o" && echo "::warning::base and head objects are identical"
+          base_obj="${RUNNER_TEMP}/base.bpf.o"
+          head_obj="${RUNNER_TEMP}/head.bpf.o"
           test_bin="$(bazel info --config=ci bazel-bin)/cgroup-signals/internal/runqlat/runqlat_test_/runqlat_test"
           : >bench.txt
           for round in 1 2 3; do
