@@ -294,8 +294,8 @@ jobs:
           for round in 1 2 3; do
             for which in base head; do
               obj="${base_obj}"; [ "${which}" = head ] && obj="${head_obj}"
-              out="$(RUNQLAT_BENCH_OBJECT="${obj}" RUNQLAT_BENCH_SECONDS=10 \
-                sudo -E "${test_bin}" -test.run '^TestMeasure$' -test.v 2>&1)" || { echo "${out}"; exit 1; }
+              out="$(sudo env RUNQLAT_BENCH_OBJECT="${obj}" RUNQLAT_BENCH_SECONDS=10 \
+                "${test_bin}" -test.run '^TestMeasure$' -test.v 2>&1)" || { echo "${out}"; exit 1; }
               echo "${out}" | grep -v '^BENCH ' || true
               grep '^BENCH ' <<<"${out}" | sed "s|object=[^ ]*|object=${which}|" | tee -a bench.txt
             done

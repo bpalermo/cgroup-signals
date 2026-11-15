@@ -21,7 +21,7 @@ import (
 // skips unless RUNQLAT_BENCH_OBJECT names an object file. Needs root.
 //
 //	RUNQLAT_BENCH_OBJECT=path/to/runqlat.bpf.o RUNQLAT_BENCH_SECONDS=10 \
-//	  sudo -E runqlat_test -test.run '^TestMeasure$' -test.v
+//	  sudo env RUNQLAT_BENCH_OBJECT=... runqlat_test -test.run '^TestMeasure$' -test.v
 //
 // The load tracks this process's cgroup in histogram 1 first, so the
 // attribution path runs as it does for a pod. Run cost is measured by the
