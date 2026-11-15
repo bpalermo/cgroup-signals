@@ -281,7 +281,8 @@ increase(cgroup_signals_psi_trigger_events_total{pod_uid!=""}[5m])
 
 ## Image
 
-`ghcr.io/bpalermo/cgroup-signals` is a multi-arch image (`linux/arm64` and
+`ghcr.io/bpalermo/cgroup-signals` (the exporter; the bpftrace debug image is
+described under "Debug pod (bpftrace)") is a multi-arch image (`linux/arm64` and
 `linux/amd64`) on a digest-pinned distroless static base. The `publish`
 workflow pushes it from `main` as `dev` and `dev-<commit>`.
 
@@ -340,6 +341,165 @@ Scrape the pods by their port name (`metrics`, `9102`), e.g. a Prometheus
   limit), `priorityClassName`, `nodeSelector`, `affinity`, `tolerations`
   (default: every node), `podAnnotations`, `podLabels`, `image.tag` (an
   override of the digest, for trying a build), and `runqueue.*` (above).
+
+## Debug pod (bpftrace)
+
+For hunting a spike on one node there is a second image and chart, separate
+from the exporter: `ghcr.io/bpalermo/cgroup-signals-bpftrace` and
+`oci://ghcr.io/bpalermo/charts/bpftrace-debug`, published by the same
+`publish` workflow, the chart pinning the image by digest like the other one.
+The chart renders **one Pod** (not a DaemonSet) bound to the node you name. It
+is for the length of an investigation: it is killed after
+`activeDeadlineSeconds` (default 3600) whatever it is doing.
+
+```bash
+kubectl create namespace bpftrace-debug
+kubectl label namespace bpftrace-debug pod-security.kubernetes.io/enforce=privileged
+
+# Sleeps until the deadline, for `kubectl exec`:
+helm install dbg oci://ghcr.io/bpalermo/charts/bpftrace-debug \
+  --version 0.1.0-dev.<commit time>.g<short commit> -n bpftrace-debug --set node=main-worker-02
+kubectl -n bpftrace-debug exec -it dbg-bpftrace-debug -- /busybox/sh
+#   inside: bpftrace -e '...'   (examples below), bpftool prog show, bpftrace -l 'tracepoint:sched:*'
+
+# Or run one program and let the pod complete (read it with `kubectl logs`):
+helm install dbg oci://ghcr.io/bpalermo/charts/bpftrace-debug -n bpftrace-debug \
+  --set node=main-worker-02 --set-file programFile=./spike.bt          # or --set-string program='...'
+
+helm uninstall dbg -n bpftrace-debug
+```
+
+- **The namespace must be Pod Security `privileged`**: the pod is `privileged`,
+  uid 0, `hostPID`, with hostPath mounts. On Talos bpftrace is not a
+  capability-only job (tracefs and debugfs writes, kprobe and uprobe
+  registration and other processes' `/proc` want `CAP_SYS_ADMIN`, and the
+  default seccomp and LSM policy still stand in the way), so this chart does
+  not pretend to be less than privileged. Everything else is closed: no API
+  token, no service links, no host network or IPC, `restartPolicy: Never`.
+- `node` is **required** (the render fails without it): `spec.nodeName`, so the
+  scheduler, taints and cordons are bypassed. Mounted from the host:
+  `/sys/kernel/debug` and `/sys/kernel/tracing` (read-write), `/sys/kernel/btf`,
+  `/sys/fs/cgroup` and `/lib/modules` (read-only). The host's processes are
+  visible through `hostPID`. `/sys/kernel/debug` and `/lib/modules` have no
+  hostPath type, so a node without them still starts the pod.
+- Values: `node`, `program` (`bpftrace -e`), `programFile` (a ConfigMap the
+  chart renders; not both), `args` (flags before the program),
+  `activeDeadlineSeconds`, `terminationGracePeriodSeconds` (5),
+  `resources` (100m / 256Mi requests, **1Gi memory limit**: bpftrace compiles
+  with LLVM in-process and can need a few hundred MiB while it does),
+  `priorityClassName`, `tolerations` (every node), `podLabels`,
+  `podAnnotations`, `image.tag`.
+
+### The image
+
+A multi-arch index (`linux/arm64`, `linux/amd64`) on
+`gcr.io/distroless/static-debian13:debug`, pinned by digest: a shell
+(`/busybox/sh`) to exec into, and nothing else a package manager would bring.
+Inside, at `/usr/local/bin`: **bpftrace v0.27.1** and **bpftool v7.8.1**
+(libbpf's static release binaries), plus bpftrace's upstream tools at
+`/usr/share/bpftrace/tools`.
+
+The upstream `bpftrace-aarch64` / `bpftrace-x86_64` assets are **not static
+binaries**: they are Nix-built AppImages (a static runtime and a squashfs of
+bpftrace with libLLVM, libclang and glibc under `/nix/store`) that need FUSE or
+a user namespace to start, and a user namespace has no `CAP_BPF` in the host's.
+So the build unpacks them (`//appimage-closure`, a pure-Go squashfs reader that
+follows the program's `RUNPATH`s the way ld.so does) and the image holds the
+program and the libraries it loads at `/nix/store`, where its interpreter
+expects them. No FUSE, no namespace, no extraction at start-up. The image is
+about 430 MiB uncompressed per architecture (LLVM is most of it); the assets
+are pinned by the sha256 GitHub records for the release.
+
+### One-liners for spike hunting
+
+Run them inside the pod (`bpftrace -e '...'`, Ctrl-C prints the maps). Each of
+these parses, type-checks and compiles with the image's bpftrace 0.27.1
+(`bpftrace --dry-run`, against a 6.8 BTF and tracepoint formats written from
+the 6.18 sources, not read from a node); the kernel's verifier has not seen
+them, and none has run on a node. `bpftrace -l '<pattern>'` lists what your kernel has if one is
+refused. Output is per second or per 10 s where a `interval` probe says so.
+
+**Run-queue latency histogram (microseconds from wakeup, or from an
+involuntary preemption, to running again; the idle task is excluded):**
+
+```
+bpftrace -e '
+tracepoint:sched:sched_wakeup, tracepoint:sched:sched_wakeup_new { @qtime[args->pid] = nsecs; }
+tracepoint:sched:sched_switch {
+  if (args->prev_pid != 0 && (args->prev_state & 0x100)) { @qtime[args->prev_pid] = nsecs; }
+  $ns = @qtime[args->next_pid];
+  if (args->next_pid != 0 && $ns) { @runq_us = hist((uint64)(nsecs - (uint64)$ns) / 1000); }
+  delete(@qtime[args->next_pid]);
+}
+'
+```
+
+**Who is being preempted while the CPU is contended** (`prev_state & 0x100` is
+`TASK_REPORT_MAX`, which the tracepoint sets on a task switched out while still
+runnable, that is preempted; the idle task is excluded; the pair is preempted,
+preemptor):
+
+```
+bpftrace -e '
+tracepoint:sched:sched_switch /args->prev_pid != 0 && (args->prev_state & 0x100)/ { @preempted[args->prev_comm, args->next_comm] = count(); }
+interval:s:10 { print(@preempted, 20); clear(@preempted); }
+'
+```
+
+**Off-CPU time by cgroup** (milliseconds slept or blocked, per 10 s, charged
+to the cgroup the task left the CPU from, saved at switch-out and read back at
+switch-in; preempted tasks are not counted; the cgroup path tells the pod from
+the kubelet or containerd):
+
+```
+bpftrace -e '
+tracepoint:sched:sched_switch {
+  if (args->prev_pid != 0 && (args->prev_state & 0xff)) { @start[args->prev_pid] = nsecs; @cg[args->prev_pid] = cgroup_path(cgroup); }
+  $s = @start[args->next_pid];
+  if (args->next_pid != 0 && $s) { @offcpu_ms[@cg[args->next_pid]] = sum((uint64)(nsecs - (uint64)$s) / 1000000); }
+  delete(@start[args->next_pid]);
+  delete(@cg[args->next_pid]);
+}
+interval:s:10 { print(@offcpu_ms, 15); clear(@offcpu_ms); }
+'
+```
+
+**Direct reclaim and `memory.high` throttling stalls** (a task reclaiming
+itself before it can allocate, and the time `mem_cgroup_handle_over_high`
+holds a task back when its cgroup is over `memory.high`; both per command):
+
+```
+bpftrace -e '
+tracepoint:vmscan:mm_vmscan_direct_reclaim_begin { @t[tid] = nsecs; }
+tracepoint:vmscan:mm_vmscan_direct_reclaim_end /@t[tid]/ { @reclaim_us[comm] = hist((uint64)(nsecs - (uint64)@t[tid]) / 1000); delete(@t[tid]); }
+kprobe:mem_cgroup_handle_over_high { @h[tid] = nsecs; }
+kretprobe:mem_cgroup_handle_over_high /@h[tid]/ { @high_throttle_us[comm] = hist((uint64)(nsecs - (uint64)@h[tid]) / 1000); delete(@h[tid]); }
+'
+```
+
+**Page faults by cgroup** (the software event, because the
+`exceptions:page_fault_*` tracepoints exist on x86 only):
+
+```
+bpftrace -e '
+software:page-faults:1 { @faults[cgroup_path(cgroup)] = count(); }
+interval:s:10 { print(@faults, 15); clear(@faults); }
+'
+```
+
+**kubelet, containerd and etcd CPU bursts** (on-CPU samples at 99 Hz, printed
+every second: a burst shows as a second above the baseline of about 99 samples
+per busy core):
+
+```
+bpftrace -e '
+profile:hz:99 /comm == "kubelet" || comm == "containerd" || comm == "etcd"/ { @samples[comm] = count(); }
+interval:s:1 { print(@samples); clear(@samples); }
+'
+```
+
+Pair a burst with the metrics of this exporter: the run-queue histogram says
+*that* tasks waited, these say *who* and *where*.
 
 ## Development
 

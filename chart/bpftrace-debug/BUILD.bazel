@@ -1,0 +1,155 @@
+load("@rules_go//go:def.bzl", "go_test")
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template", "helm_template_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel:registry.bzl", "CHART_REGISTRY_URL")
+
+# The chart, published as an OCI artifact to CHART_REGISTRY_URL/bpftrace-debug
+# (oci://ghcr.io/bpalermo/charts/bpftrace-debug) under the version Chart.yaml
+# stamps, like chart/cgroup-signals:
+#   bazel run //bpftrace:image_push                            # the image first
+#   bazel run //chart/bpftrace-debug:bpftrace-debug.push_registry
+# The image is pinned by digest at package time ({@//bpftrace:image_push.digest}
+# in values.yaml). `node` has no default, so the chart's own lint and template
+# targets set it.
+helm_chart(
+    name = "bpftrace-debug",
+    chart = "Chart.yaml",
+    images = ["//bpftrace:image_push"],
+    registry_url = CHART_REGISTRY_URL,
+    stamp = 1,
+    values = "values.yaml",
+    visibility = ["//visibility:public"],
+)
+
+helm_lint_test(
+    name = "bpftrace-debug_lint_test",
+    chart = ":bpftrace-debug",
+    opts = [
+        "--set",
+        "node=main-worker-02",
+    ],
+)
+
+helm_template_test(
+    name = "bpftrace-debug_template_test",
+    chart = ":bpftrace-debug",
+    opts = [
+        "--set",
+        "node=main-worker-02",
+    ],
+)
+
+helm_template_test(
+    name = "bpftrace-debug_program_template_test",
+    chart = ":bpftrace-debug",
+    opts = [
+        "--set",
+        "node=main-worker-02",
+        "--set-string",
+        "program=BEGIN { printf(\"hi\"); exit(); }",
+    ],
+)
+
+helm_template_test(
+    name = "bpftrace-debug_tag_template_test",
+    chart = ":bpftrace-debug",
+    opts = [
+        "--set",
+        "node=main-worker-02",
+        "--set",
+        "image.tag=dev",
+    ],
+)
+
+# The renders for hardening_test.go: the defaults (sleep mode), a one-liner,
+# a program file, and every option that changes the pod.
+helm_template(
+    name = "rendered_default",
+    chart = ":bpftrace-debug",
+    opts = [
+        "--namespace",
+        "bpftrace-debug",
+        "--set",
+        "node=main-worker-02",
+    ],
+)
+
+helm_template(
+    name = "rendered_program",
+    chart = ":bpftrace-debug",
+    opts = [
+        "--namespace",
+        "bpftrace-debug",
+        "--set",
+        "node=main-worker-02",
+        "--set-string",
+        "program=tracepoint:sched:sched_switch { @[comm] = count(); }",
+        "--set",
+        "args={-q,--no-warnings}",
+    ],
+)
+
+helm_template(
+    name = "rendered_programfile",
+    chart = ":bpftrace-debug",
+    opts = [
+        "--namespace",
+        "bpftrace-debug",
+        "--set",
+        "node=main-worker-02",
+        "--set-string",
+        "programFile=BEGIN { printf(\"hi\"); exit(); }",
+    ],
+)
+
+helm_template(
+    name = "rendered_options",
+    chart = ":bpftrace-debug",
+    opts = [
+        "--namespace",
+        "bpftrace-debug",
+        "--set",
+        "node=main-worker-02",
+        "--set",
+        "activeDeadlineSeconds=600",
+        "--set",
+        "terminationGracePeriodSeconds=10",
+        "--set",
+        "resources.limits.memory=2Gi",
+        "--set",
+        "priorityClassName=system-node-critical",
+        "--set",
+        "podLabels.team=o11y",
+        "--set",
+        "podAnnotations.example=one",
+    ],
+)
+
+go_test(
+    name = "bpftrace-debug_test",
+    srcs = ["hardening_test.go"],
+    data = [
+        ":rendered_default",
+        ":rendered_options",
+        ":rendered_program",
+        ":rendered_programfile",
+    ],
+    deps = ["@in_yaml_go_yaml_v3//:yaml"],
+)
+
+# `fail` guards: nothing upstream asserts that a render FAILS, so this runs
+# helm itself on the packaged chart.
+sh_test(
+    name = "render_guards_test",
+    size = "small",
+    srcs = ["render_guards_test.sh"],
+    args = [
+        "$(rlocationpath @helm//:helm)",
+        "$(rlocationpath :bpftrace-debug)",
+    ],
+    data = [
+        ":bpftrace-debug",
+        "@helm",
+    ],
+    deps = ["@rules_shell//shell/runfiles"],
+)

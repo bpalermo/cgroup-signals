@@ -78,7 +78,7 @@ jobs:
       # label that does not exist and costs nothing else. Keep this equal to
       # what publish.yml pushes.
       - name: the publish targets exist
-        run: bazel query --config=ci --noshow_progress 'set(//cgroup-signals:image_push //cgroup-signals:image_index //chart/cgroup-signals:cgroup-signals //chart/cgroup-signals:cgroup-signals.push_registry //bazel:verify-chart.sh)'
+        run: bazel query --config=ci --noshow_progress 'set(//cgroup-signals:image_push //cgroup-signals:image_index //bpftrace:image_push //bpftrace:image_index //chart/cgroup-signals:cgroup-signals //chart/cgroup-signals:cgroup-signals.push_registry //chart/bpftrace-debug:bpftrace-debug //chart/bpftrace-debug:bpftrace-debug.push_registry //bazel:verify-chart.sh)'
 
   # Target determination. bazel-diff hashes the build graph at the base and at
   # the head of the range under test and reports the targets whose hash

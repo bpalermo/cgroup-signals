@@ -62,7 +62,7 @@ go_sdk.nogo(nogo = "//:nogo")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-use_repo(go_deps, "co_honnef_go_tools", "com_github_cilium_ebpf", "com_github_prometheus_client_golang", "com_github_prometheus_client_model", "com_github_uudashr_gocognit", "in_yaml_go_yaml_v3", "org_golang_x_sys")
+use_repo(go_deps, "co_honnef_go_tools", "com_github_calebq42_squashfs", "com_github_cilium_ebpf", "com_github_prometheus_client_golang", "com_github_prometheus_client_model", "com_github_uudashr_gocognit", "in_yaml_go_yaml_v3", "org_golang_x_sys")
 
 # Container image base: distroless static on Debian 13, nonroot variant (user
 # 65532), pinned by index digest so a moving tag cannot change the image.
@@ -77,4 +77,50 @@ pull(
     layer_handling = "lazy",
     registry = "gcr.io",
     repository = "distroless/static-debian13",
+)
+
+# The debug variant of the same base (busybox at /busybox/sh, root by default)
+# for the bpftrace image, which people exec into. Resolved from
+# gcr.io/distroless/static-debian13:debug, pinned by index digest.
+pull(
+    name = "distroless_static_debug",
+    digest = "sha256:ebd32759877244c6e72c1610b6fb1cd1004625cc575361ee2ae0b79df9eb3893",
+    layer_handling = "lazy",
+    registry = "gcr.io",
+    repository = "distroless/static-debian13",
+)
+
+# bpftrace v0.27.1, the upstream release assets (sha256 as GitHub records them
+# in the release API). They are Nix-built AppImages, not static binaries: a
+# static runtime plus a squashfs of the program and its /nix/store closure.
+# //appimage-closure unpacks them at build time (see //bpftrace).
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "bpftrace_aarch64",
+    sha256 = "ad159222808d799eaa85424001535836314cf21977a71686b7b7c091b5195672",
+    urls = ["https://github.com/bpftrace/bpftrace/releases/download/v0.27.1/bpftrace-aarch64"],
+)
+
+http_file(
+    name = "bpftrace_x86_64",
+    sha256 = "c8d570302725bd1a3ed2f23bfa8d83dd78bde95daa98856279343052db5799c9",
+    urls = ["https://github.com/bpftrace/bpftrace/releases/download/v0.27.1/bpftrace-x86_64"],
+)
+
+# bpftool v7.8.1 from libbpf/bpftool: statically linked release binaries.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "bpftool_arm64",
+    build_file_content = 'exports_files(["bpftool"])',
+    sha256 = "678cc6fdc545f6baf9fc80bbca3ab4cb0efcd3f4d814c6fada00ca0987a4c6b0",
+    urls = ["https://github.com/libbpf/bpftool/releases/download/v7.8.1/bpftool-v7.8.1-arm64.tar.gz"],
+)
+
+http_archive(
+    name = "bpftool_amd64",
+    build_file_content = 'exports_files(["bpftool"])',
+    sha256 = "112026bbdf48d0d00ccfc4926e59878d47943f97c197f959f110abe29c898ddc",
+    urls = ["https://github.com/libbpf/bpftool/releases/download/v7.8.1/bpftool-v7.8.1-amd64.tar.gz"],
 )

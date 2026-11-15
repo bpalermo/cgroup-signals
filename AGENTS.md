@@ -4,7 +4,8 @@ Guidance for agents working in this repository.
 
 ## What this is
 
-cgroup-signals is one Go binary, `cgroup-signals`, run as a privileged
+cgroup-signals is one Go binary, `cgroup-signals`, plus an on-demand bpftrace
+debug pod (see "Images and versions"). The binary runs as a privileged
 DaemonSet on cgroup v2 nodes (Talos, kernel 6.18, arm64 Raspberry Pi CM4; amd64
 is built too). It exports per-cgroup kernel signals as Prometheus metrics:
 
@@ -79,6 +80,9 @@ proxy, because the Go environment here is `GOPROXY=direct`.
   cgroups), `runqlat` (the run-queue eBPF program: loader, histogram indices,
   its own `prometheus.Collector`) and `server` (HTTP). File access goes through `fs.FS` and small
   interfaces, so the logic is tested against a tree under `t.TempDir()`.
+- `appimage-closure/`: the build tool that unpacks bpftrace's AppImage (not
+  shipped; `internal/tree` reads the squashfs, `internal/closure` follows the
+  ELF run paths and writes the tar). `bpftrace/` is the debug image's BUILD.
 - `bpf/` holds the `*.bpf.c` programs, their headers and `vmlinux.h` (see BPF
   below); `bazel/bpf/` the rule that compiles them.
 - `bazel/` holds build rules: `image/` (the `go_image` macro), `lint/`,
@@ -181,6 +185,27 @@ pod needs `CAP_BPF` and `CAP_PERFMON` for `--runqueue` and read access to
   `bazel/verify-chart.sh` before `...push_registry`; keep the chart's pushed
   version and the README in step with `bazel/workspace_status.sh`. Do not add a
   probe on `/metrics` (a GET resets every memory peak).
+- There are TWO images and TWO charts, each chart pinning its image by digest:
+  `//cgroup-signals:image_push` (`ghcr.io/bpalermo/cgroup-signals`) with
+  `chart/cgroup-signals`, and `//bpftrace:image_push`
+  (`ghcr.io/bpalermo/cgroup-signals-bpftrace`) with `chart/bpftrace-debug`.
+  `bazel/verify-chart.sh <chart-name> <chart.tgz> <digest> <version> <commit>`
+  checks either. The publish job pushes both images, then verifies and pushes
+  both charts; keep it, the `lint` job's "publish targets exist" query and
+  this list in step when adding a third.
+- `//bpftrace` is a debug image (distroless static `:debug` base, pinned by
+  digest as `@distroless_static_debug`) holding bpftrace v0.27.1 and bpftool
+  v7.8.1, both pinned with sha256 in `MODULE.bazel`. bpftrace's release asset
+  is a Nix AppImage, not a static binary: `//appimage-closure` (a Go tool, built
+  by Bazel and run in a genrule) reads the squashfs and writes the layer of the
+  program and the libraries its `RUNPATH`s lead to, at `/nix/store`. A bpftrace
+  bump is the two `http_file` pins; if the AppImage's layout changes the tool
+  fails the build (no `entrypoint`, a library in no run path) rather than
+  shipping a broken image. `chart/bpftrace-debug` renders ONE privileged
+  hostPID Pod bound to `node` (required) with a deadline: it is deliberately
+  not a DaemonSet and not a hardened pod; `hardening_test.go` pins what is
+  and is not open. The README's one-liners were checked with
+  `bpftrace --dry-run`; re-check them on a bpftrace bump.
 - Only CI publishes (`.github/workflows/publish.yml`, on `main`). Never push an
   image or create a release by hand.
 

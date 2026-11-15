@@ -1,0 +1,72 @@
+# ONE debug Pod on ONE node, for the length of an investigation. Read the
+# repository's README ("Debug pod (bpftrace)") first.
+#
+#   helm install dbg oci://ghcr.io/bpalermo/charts/bpftrace-debug \
+#     --namespace bpftrace-debug --set node=main-worker-02
+#
+# The namespace must allow privileged pods, hostPID and hostPath (Pod Security
+# `privileged`).
+
+# REQUIRED: the node to debug (spec.nodeName). Binding by name skips the
+# scheduler, so taints and cordons do not apply; the tolerations below only
+# matter to what evicts it.
+node: ""
+
+image:
+  repository: ghcr.io/bpalermo/cgroup-signals-bpftrace
+  # Pinned by digest at package time: the multi-arch index that the same commit
+  # pushed (//bpftrace:image_push).
+  digest: "{@//bpftrace:image_push.digest}"
+  # Optional override, for trying another build; wins over the digest.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# What the container runs.
+#   program, set:      `bpftrace <args> -e <program>`, then the pod completes.
+#   programFile, set:  `bpftrace <args> /etc/bpftrace/program.bt`, the file's
+#                      content rendered into a ConfigMap (use --set-file).
+#   neither:           sleeps until activeDeadlineSeconds, for
+#                      `kubectl exec -it <pod> -- /busybox/sh`.
+# Setting both fails the render.
+program: ""
+programFile: ""
+
+# Flags for bpftrace before the program, e.g. ["-q"] or ["-o", "/tmp/out.txt"].
+args: []
+
+# The pod is killed this long after it starts, so a forgotten one cannot run
+# for ever. Sleeping (no program) it ends in `DeadlineExceeded`.
+activeDeadlineSeconds: 3600
+
+# Short: nothing here needs a graceful stop; bpftrace prints its maps on SIGTERM.
+terminationGracePeriodSeconds: 5
+
+# bpftrace compiles the program with clang/LLVM inside the process; a program
+# with many probes or `#include`s can reach several hundred MiB while it
+# compiles, then drops to tens. Raise the limit before lowering it.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# Hardening this chart does NOT have, on purpose: the pod is privileged
+# (`securityContext.privileged: true`, uid 0, hostPID). On Talos bpftrace needs
+# more than CAP_BPF and CAP_PERFMON: tracefs and debugfs writes, kprobe and
+# uprobe registration, and reading other processes' /proc entries all want
+# CAP_SYS_ADMIN, and the default seccomp profile and the LSM policy would still
+# stand in the way of a capability-only pod. Everything else is closed: no API
+# token, no service links, no host network or IPC, a read-only view of the
+# host's BTF, cgroup tree and kernel modules, and a hard deadline.
+
+priorityClassName: ""
+
+# Every node, whatever its taints.
+tolerations:
+  - operator: Exists
+
+podAnnotations: {}
+podLabels: {}

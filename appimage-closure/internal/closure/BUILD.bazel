@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "closure",
+    srcs = ["closure.go"],
+    importpath = "github.com/bpalermo/cgroup-signals/appimage-closure/internal/closure",
+    visibility = ["//appimage-closure:__subpackages__"],
+    deps = ["//appimage-closure/internal/tree"],
+)
+
+go_test(
+    name = "closure_test",
+    srcs = ["closure_test.go"],
+    deps = [
+        ":closure",
+        "//appimage-closure/internal/tree",
+    ],
+)

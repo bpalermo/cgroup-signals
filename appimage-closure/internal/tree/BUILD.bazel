@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tree",
+    srcs = [
+        "squash.go",
+        "tree.go",
+    ],
+    importpath = "github.com/bpalermo/cgroup-signals/appimage-closure/internal/tree",
+    visibility = ["//appimage-closure:__subpackages__"],
+    deps = ["@com_github_calebq42_squashfs//:squashfs"],
+)
+
+go_test(
+    name = "tree_test",
+    srcs = ["tree_test.go"],
+    deps = [":tree"],
+)
