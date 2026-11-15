@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cgroupfs",
+    srcs = ["cgroupfs.go"],
+    importpath = "github.com/bpalermo/cgroup-signals/cgroup-signals/internal/cgroupfs",
+    visibility = ["//cgroup-signals:__subpackages__"],
+    deps = ["@org_golang_x_sys//unix"],
+)
+
+go_test(
+    name = "cgroupfs_test",
+    srcs = ["cgroupfs_test.go"],
+    embed = [":cgroupfs"],
+)

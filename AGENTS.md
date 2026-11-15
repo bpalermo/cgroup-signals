@@ -8,15 +8,28 @@ cgroup-signals is one Go binary, `cgroup-signals`, run as a privileged
 DaemonSet on cgroup v2 nodes (Talos, kernel 6.18, arm64 Raspberry Pi CM4; amd64
 is built too). It exports per-cgroup kernel signals as Prometheus metrics:
 
-1. `memory.peak` of each pod cgroup, read through one fd per cgroup and reset
-   by writing to that fd after every scrape (the peak since the last scrape);
-2. PSI triggers armed on `cpu.pressure` and `memory.pressure`, polled for
-   `POLLPRI`;
-3. later, a CO-RE eBPF run-queue latency histogram per cgroup (`sched_wakeup`
+1. `memory.peak` of each pod and node-service cgroup, read through one fd per
+   cgroup and reset by writing to that fd in every scrape (the peak since the
+   last scrape; kernel 6.12+);
+2. PSI triggers armed on `cpu.pressure` and `memory.pressure`, waited on for
+   `POLLPRI` by one epoll goroutine;
+3. the `memory.events` counters, read at scrape time;
+4. later, a CO-RE eBPF run-queue latency histogram per cgroup (`sched_wakeup`
    and `sched_switch` tracepoints).
 
-Only the skeleton exists: flags, `/metrics`, `/healthz` and graceful shutdown.
-Keep this section true as the signals land.
+1-3 are implemented (README.md lists the metrics, flags and privileges); 4 is
+not. Keep this section true as the signals land.
+
+Rules the code depends on:
+
+- One collector owns the `memory.peak` reset, and it happens in `Collect`,
+  never in a background loop: the window is the scrape interval.
+- A cgroup that disappears (not found by the rescan, `ENODEV`, `EPOLLERR`) is
+  dropped quietly and everything held for it closed; it is not a scan error.
+- No Kubernetes API client: pods are identified by `pod_uid`, joined in
+  PromQL to kube-state-metrics' `kube_pod_info{uid}`.
+- Do not export what cAdvisor already does (per-container PSI totals,
+  lifetime `memory.peak`).
 
 ## Build and test
 
@@ -55,6 +68,12 @@ proxy, because the Go environment here is `GOPROXY=direct`.
 - No `cmd/`. The binary lives in a root-level directory with its `main.go`:
   `cgroup-signals/`. Code private to it is under its `internal/`; code shared
   between binaries goes under `common/`.
+- `cgroup-signals/internal/`: `cgroupfs` (discovery and file parsing),
+  `peak` (the per-fd `memory.peak` read and reset; `peak/peaktest` fakes the
+  kernel's semantics), `psi` (trigger validation, arming, the epoll
+  watcher), `collector` (the `prometheus.Collector` that owns the tracked
+  cgroups) and `server` (HTTP). File access goes through `fs.FS` and small
+  interfaces, so the logic is tested against a tree under `t.TempDir()`.
 - `bpf/` is reserved for the `*.bpf.c` programs (see BPF below).
 - `bazel/` holds build rules: `image/` (the `go_image` macro), `lint/`,
   `nogo/`, `format/`, `platforms/`, `registry.bzl`, the workspace status

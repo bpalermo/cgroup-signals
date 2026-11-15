@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "peaktest",
+    srcs = ["peaktest.go"],
+    importpath = "github.com/bpalermo/cgroup-signals/cgroup-signals/internal/peak/peaktest",
+    visibility = ["//cgroup-signals:__subpackages__"],
+    deps = ["//cgroup-signals/internal/peak"],
+)
