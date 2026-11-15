@@ -89,12 +89,61 @@ helm_template(
     ],
 )
 
+# The run-queue DaemonSet on, and with every option that changes it.
+helm_template(
+    name = "rendered_runqueue",
+    chart = ":cgroup-signals",
+    opts = [
+        "--namespace",
+        "cgroup-signals",
+        "--set",
+        "runqueue.enabled=true",
+    ],
+)
+
+helm_template(
+    name = "rendered_runqueue_options",
+    chart = ":cgroup-signals",
+    opts = [
+        "--namespace",
+        "cgroup-signals",
+        "--set",
+        "runqueue.enabled=true",
+        "--set",
+        "runqueue.port=9200",
+        "--set",
+        "runqueue.maxTrackedCgroups=64",
+        "--set",
+        "runqueue.rescanInterval=30s",
+        "--set",
+        "runqueue.seccompProfile=Unconfined",
+        "--set",
+        "runqueue.extraArgs={--some-flag=y}",
+        "--set",
+        "priorityClassName=system-node-critical",
+        "--set",
+        "podLabels.team=o11y",
+    ],
+)
+
+# Enabled: both DaemonSets render and lint.
+helm_template_test(
+    name = "cgroup-signals_runqueue_template_test",
+    chart = ":cgroup-signals",
+    opts = [
+        "--set",
+        "runqueue.enabled=true",
+    ],
+)
+
 go_test(
     name = "cgroup-signals_test",
     srcs = ["hardening_test.go"],
     data = [
         ":rendered_default",
         ":rendered_privileged",
+        ":rendered_runqueue",
+        ":rendered_runqueue_options",
     ],
     deps = ["@in_yaml_go_yaml_v3//:yaml"],
 )

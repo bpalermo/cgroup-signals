@@ -20,9 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -181,4 +184,20 @@ func CheckV2(root string) error {
 // file: kernfs answers ENODEV once a removed cgroup's files are deactivated.
 func IsRemoved(err error) bool {
 	return errors.Is(err, unix.ENODEV)
+}
+
+// Inode returns the inode number of the cgroup directory at p, slash-separated
+// and relative to root. On a 64-bit kernel it is the cgroup's id: the number
+// `bpf_get_current_cgroup_id` and a BPF program's `cgroup->kn->id` report. A
+// directory that does not exist returns an error satisfying fs.ErrNotExist.
+func Inode(root, p string) (uint64, error) {
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(p)))
+	if err != nil {
+		return 0, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("stat %s: no inode number on this platform", p)
+	}
+	return st.Ino, nil
 }

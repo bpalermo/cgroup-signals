@@ -1,0 +1,46 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# The BPF object, compiled by the hermetic clang (//bazel/bpf), copied next to
+# the Go code so that go:embed can name it. Gazelle cannot see a generated
+# file, hence the `keep`s below.
+copy_file(
+    name = "object",
+    src = "//bpf:runqlat",
+    out = "runqlat.bpf.o",
+)
+
+go_library(
+    name = "runqlat",
+    srcs = [
+        "collector.go",
+        "runqlat.go",
+    ],
+    embedsrcs = [":object"],  # keep
+    importpath = "github.com/bpalermo/cgroup-signals/cgroup-signals/internal/runqlat",
+    visibility = ["//cgroup-signals:__subpackages__"],
+    deps = [
+        "//cgroup-signals/internal/cgroupfs",
+        "@com_github_cilium_ebpf//:ebpf",
+        "@com_github_cilium_ebpf//btf",
+        "@com_github_cilium_ebpf//link",
+        "@com_github_prometheus_client_golang//prometheus",
+        "@org_golang_x_sys//unix",
+    ],
+)
+
+go_test(
+    name = "runqlat_test",
+    srcs = [
+        "collector_test.go",
+        "runqlat_test.go",
+    ],
+    embed = [":runqlat"],
+    deps = [
+        "@com_github_cilium_ebpf//:ebpf",
+        "@com_github_cilium_ebpf//btf",
+        "@com_github_prometheus_client_golang//prometheus",
+        "@com_github_prometheus_client_model//go",
+        "@org_golang_x_sys//unix",
+    ],
+)

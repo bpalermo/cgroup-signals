@@ -1,0 +1,16 @@
+load("//bazel/bpf:defs.bzl", "bpf_object")
+
+exports_files(["runqlat.bpf.c"])
+
+# The object, built by the hermetic clang. A copy sits next to the Go code that
+# embeds it: see //cgroup-signals/internal/runqlat.
+bpf_object(
+    name = "runqlat",
+    src = "runqlat.bpf.c",
+    out = "runqlat.bpf.o",
+    hdrs = [
+        "runqlat.h",
+        "vmlinux.h",
+    ],
+    visibility = ["//cgroup-signals/internal/runqlat:__pkg__"],
+)

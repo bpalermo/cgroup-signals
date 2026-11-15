@@ -4,13 +4,17 @@ load("//bazel/image:defs.bzl", "go_image")
 
 go_library(
     name = "cgroup-signals_lib",
-    srcs = ["main.go"],
+    srcs = [
+        "main.go",
+        "runqueue.go",
+    ],
     importpath = "github.com/bpalermo/cgroup-signals/cgroup-signals",
     visibility = ["//visibility:private"],
     deps = [
         "//cgroup-signals/internal/cgroupfs",
         "//cgroup-signals/internal/collector",
         "//cgroup-signals/internal/psi",
+        "//cgroup-signals/internal/runqlat",
         "//cgroup-signals/internal/server",
         "//common/version",
         "@com_github_prometheus_client_golang//prometheus",
@@ -43,7 +47,7 @@ go_image(
     repository = image_repository("cgroup-signals"),
     # Root: the cgroup files it writes (memory.peak, the PSI triggers) are
     # root's with mode 0644, sub-2 s PSI windows need CAP_SYS_RESOURCE and
-    # the BPF programs CAP_BPF, which the runtime grants the container's
-    # process only as uid 0 in a privileged DaemonSet.
+    # --runqueue's BPF programs CAP_BPF and CAP_PERFMON: a container's
+    # capabilities are effective only for uid 0.
     user = "0",
 )

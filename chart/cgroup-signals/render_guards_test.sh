@@ -53,4 +53,9 @@ works --set psi.windowUs=1000000 --set privileged=true
 fails "not a multiple of 2000000" --set psi.windowUs=1000000
 fails "not a multiple of 2000000" --set psi.windowUs=3000000
 fails "image.digest or image.tag is required" --set image.digest=
+works --set runqueue.enabled=true --set runqueue.maxTrackedCgroups=4095
+fails "outside 1..4095" --set runqueue.enabled=true --set runqueue.maxTrackedCgroups=0
+fails "outside 1..4095" --set runqueue.enabled=true --set runqueue.maxTrackedCgroups=4096
+# Disabled, the run-queue values are not looked at.
+works --set runqueue.maxTrackedCgroups=0
 echo PASS
