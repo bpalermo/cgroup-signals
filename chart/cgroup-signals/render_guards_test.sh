@@ -53,4 +53,27 @@ works --set psi.windowUs=1000000 --set privileged=true
 fails "not a multiple of 2000000" --set psi.windowUs=1000000
 fails "not a multiple of 2000000" --set psi.windowUs=3000000
 fails "image.digest or image.tag is required" --set image.digest=
+works --set runqueue.enabled=true --set runqueue.maxTrackedCgroups=4095
+fails "outside 1..4095" --set runqueue.enabled=true --set runqueue.maxTrackedCgroups=0
+fails "outside 1..4095" --set runqueue.enabled=true --set runqueue.maxTrackedCgroups=4096
+# Disabled, the run-queue values are not looked at.
+works --set runqueue.maxTrackedCgroups=0
+
+# A long release name: the two DaemonSets still get different names of at most
+# 63 characters (the suffix is kept, the base is truncated).
+long="$(printf 'a%.0s' $(seq 1 48))"
+names="$("${helm}" template "${long}" "${chart}" --namespace ns --set runqueue.enabled=true | grep -E '^  name: ' | sort -u)"
+[ "$(wc -l <<<"${names}")" -eq 2 ] || {
+	echo "FAIL: want 2 distinct DaemonSet names for a 48-character release, got:" >&2
+	echo "${names}" >&2
+	exit 1
+}
+while read -r _ n; do [ "${#n}" -le 63 ] || {
+	echo "FAIL: name ${n} is over 63 characters" >&2
+	exit 1
+}; done <<<"${names}"
+grep -q -- '-runqueue$' <<<"${names}" || {
+	echo "FAIL: the run-queue name lost its suffix" >&2
+	exit 1
+}
 echo PASS

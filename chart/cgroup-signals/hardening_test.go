@@ -8,10 +8,12 @@ package cgroupsignals_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
@@ -182,5 +184,147 @@ func TestOptions(t *testing.T) {
 	got := args(t, c)
 	if !slices.Contains(got, "--psi-window-us=1000000") || got[len(got)-1] != "--some-flag=x" {
 		t.Errorf("args: %v", got)
+	}
+}
+
+// daemonSets is every DaemonSet of a render, by name without the release's, after checking that
+// nothing else is rendered.
+func daemonSets(t *testing.T, file string) map[string]object {
+	t.Helper()
+	out := map[string]object{}
+	for _, o := range render(t, file) {
+		if o["kind"] != "DaemonSet" {
+			t.Fatalf("%s renders a %v, want DaemonSets only", file, o["kind"])
+		}
+		out[strings.TrimPrefix(get(o, "metadata", "name").(string), "release-name-")] = o // helm template's release name
+	}
+	return out
+}
+
+func TestRunqueueIsOffByDefault(t *testing.T) {
+	// daemonSet fails unless the render is exactly one DaemonSet.
+	ds := daemonSet(t, "rendered_default.yaml")
+	if strings.HasSuffix(get(ds, "metadata", "name").(string), "-runqueue") {
+		t.Error("the default render is the run-queue DaemonSet")
+	}
+	data, err := os.ReadFile("rendered_default.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("runqueue")) || bytes.Contains(data, []byte("BPF")) {
+		t.Error("the default render mentions the run-queue exporter or BPF")
+	}
+}
+
+func TestRunqueue(t *testing.T) {
+	sets := daemonSets(t, "rendered_runqueue.yaml")
+	if len(sets) != 2 || sets["cgroup-signals"] == nil || sets["cgroup-signals-runqueue"] == nil {
+		t.Fatalf("want the exporter and the run-queue DaemonSet, have %v", sets)
+	}
+
+	// Enabling it changes nothing about the exporter's own pod.
+	exporter := container(t, sets["cgroup-signals"])
+	if !reflect.DeepEqual(get(exporter, "securityContext", "capabilities"), object{"drop": []any{"ALL"}}) ||
+		get(exporter, "securityContext", "privileged") != nil {
+		t.Error("the exporter's security context changed: it must keep no capability at all")
+	}
+
+	ds := sets["cgroup-signals-runqueue"]
+	spec := get(ds, "spec", "template", "spec")
+	c := container(t, ds)
+	check := func(ok bool, what string) {
+		t.Helper()
+		if !ok {
+			t.Error(what)
+		}
+	}
+
+	// The selectors of the two DaemonSets match only their own pods.
+	own := get(ds, "spec", "selector", "matchLabels")
+	other := get(sets["cgroup-signals"], "spec", "selector", "matchLabels")
+	check(get(own, "app.kubernetes.io/name") == "cgroup-signals-runqueue", "the run-queue selector names cgroup-signals-runqueue")
+	check(get(other, "app.kubernetes.io/name") == "cgroup-signals", "the exporter's selector is unchanged")
+	podLabels := get(ds, "spec", "template", "metadata", "labels").(object)
+	for k, v := range own.(object) {
+		check(podLabels[k] == v, "the pod template does not carry the selector label "+k)
+	}
+	check(podLabels["app.kubernetes.io/name"] != "cgroup-signals", "the run-queue pod must not match the exporter's selector")
+
+	check(get(spec, "automountServiceAccountToken") == false && get(spec, "serviceAccountName") == nil, "no API token, no ServiceAccount")
+	for _, k := range []string{"hostNetwork", "hostPID", "hostIPC"} {
+		check(get(spec, k) == nil || get(spec, k) == false, k+" must be off")
+	}
+	check(get(spec, "securityContext", "runAsUser") == 0, "pod runAsUser must be 0: capabilities are effective only for root")
+	check(get(spec, "securityContext", "seccompProfile", "type") == "RuntimeDefault", "pod seccompProfile must be RuntimeDefault")
+
+	sc := get(c, "securityContext")
+	check(get(sc, "privileged") == nil, "the run-queue container must not be privileged")
+	check(get(sc, "allowPrivilegeEscalation") == false, "allowPrivilegeEscalation must be false")
+	check(get(sc, "readOnlyRootFilesystem") == true, "readOnlyRootFilesystem must be true")
+	check(reflect.DeepEqual(get(sc, "capabilities"), object{"drop": []any{"ALL"}, "add": []any{"BPF", "PERFMON"}}),
+		"capabilities must be exactly drop [ALL], add [BPF, PERFMON]")
+
+	img, _ := c["image"].(string)
+	check(bytes.HasPrefix([]byte(img), []byte("ghcr.io/bpalermo/cgroup-signals@sha256:")), "image is pinned by digest, the same repository: "+img)
+	check(img == container(t, sets["cgroup-signals"])["image"], "both DaemonSets run the same image")
+
+	want := []string{
+		"--runqueue",
+		"--listen=:9103",
+		"--cgroup-root=/host/sys/fs/cgroup",
+		"--rescan-interval=15s",
+		"--max-tracked-cgroups=512",
+		"--log-level=info",
+	}
+	check(slices.Equal(args(t, c), want), fmt.Sprintf("args are %v, want %v", args(t, c), want))
+	for _, a := range args(t, c) {
+		check(!strings.HasPrefix(a, "--psi-"), "the run-queue exporter takes no PSI flag: "+a)
+	}
+
+	ports, _ := c["ports"].([]any)
+	check(len(ports) == 1 && get(ports[0], "name") == "runqueue" && get(ports[0], "containerPort") == 9103, "one port, runqueue, 9103")
+	for _, k := range []string{"livenessProbe", "readinessProbe", "startupProbe"} {
+		if p := get(c, k); p != nil {
+			check(get(p, "httpGet", "path") == "/healthz", k+" must use /healthz, never /metrics")
+		}
+	}
+	check(get(c, "livenessProbe") != nil && get(c, "readinessProbe") != nil, "probes are on /healthz by default")
+
+	vols, _ := get(spec, "volumes").([]any)
+	check(len(vols) == 1 && reflect.DeepEqual(get(vols[0], "hostPath"), object{"path": "/sys/fs/cgroup", "type": "Directory"}), "the only volume is hostPath /sys/fs/cgroup, Directory")
+	mounts, _ := c["volumeMounts"].([]any)
+	check(len(mounts) == 1 && get(mounts[0], "mountPath") == "/host/sys/fs/cgroup" && get(mounts[0], "readOnly") == true, "cgroupfs is mounted READ-ONLY at /host/sys/fs/cgroup")
+	check(reflect.DeepEqual(get(spec, "tolerations"), []any{object{"operator": "Exists"}}), "tolerations default to every node")
+}
+
+func TestRunqueueOptions(t *testing.T) {
+	sets := daemonSets(t, "rendered_runqueue_options.yaml")
+	ds := sets["cgroup-signals-runqueue"]
+	if ds == nil {
+		t.Fatalf("no run-queue DaemonSet in %v", sets)
+	}
+	c := container(t, ds)
+	got := args(t, c)
+	for _, w := range []string{"--listen=:9200", "--max-tracked-cgroups=64", "--rescan-interval=30s"} {
+		if !slices.Contains(got, w) {
+			t.Errorf("args %v lack %s", got, w)
+		}
+	}
+	if got[len(got)-1] != "--some-flag=y" {
+		t.Errorf("extraArgs are last: %v", got)
+	}
+	if get(ds, "spec", "template", "spec", "securityContext", "seccompProfile", "type") != "Unconfined" {
+		t.Error("runqueue.seccompProfile")
+	}
+	if get(ds, "spec", "template", "spec", "priorityClassName") != "system-node-critical" ||
+		get(ds, "spec", "template", "metadata", "labels", "team") != "o11y" {
+		t.Error("the top-level priorityClassName and podLabels apply to the run-queue pod too")
+	}
+	if get(c, "securityContext", "privileged") != nil {
+		t.Error("no option makes the run-queue container privileged")
+	}
+	ports, _ := c["ports"].([]any)
+	if len(ports) != 1 || get(ports[0], "containerPort") != 9200 || get(c, "livenessProbe", "httpGet", "port") != "runqueue" {
+		t.Error("the port follows runqueue.port, and the probes use its name")
 	}
 }

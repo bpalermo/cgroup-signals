@@ -34,6 +34,20 @@ use_repo(helm, "helm", "helm_toolchains")
 
 register_toolchains("@helm_toolchains//:all")
 
+# The eBPF programs (//bpf): compiled by clang from toolchains_llvm, the LLVM
+# release for the machine Bazel runs on (linux amd64 or arm64), used only as a
+# compiler for //bazel/bpf:defs.bzl; no C++ toolchain is registered, so nothing
+# else changes. libbpf is only its headers (bpf_helpers.h, bpf_core_read.h,
+# bpf_tracing.h); the vmlinux.h is checked in (bpf/vmlinux.h).
+bazel_dep(name = "toolchains_llvm", version = "1.13.0")
+bazel_dep(name = "libbpf", version = "1.7.0.bcr.2")
+
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+
+# 20.1.8: the newest LLVM 20 release, with prebuilt linux amd64 and arm64.
+llvm.toolchain(llvm_version = "20.1.8")
+use_repo(llvm, "llvm_toolchain_llvm")
+
 # The Go toolchain, pinned here rather than read from go.mod: go.mod's `go`
 # line is the language version the module requires, this is the exact SDK
 # every build compiles with. Bump both together; the SDK must not be older
@@ -48,7 +62,7 @@ go_sdk.nogo(nogo = "//:nogo")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-use_repo(go_deps, "co_honnef_go_tools", "com_github_prometheus_client_golang", "com_github_prometheus_client_model", "com_github_uudashr_gocognit", "in_yaml_go_yaml_v3", "org_golang_x_sys")
+use_repo(go_deps, "co_honnef_go_tools", "com_github_cilium_ebpf", "com_github_prometheus_client_golang", "com_github_prometheus_client_model", "com_github_uudashr_gocognit", "in_yaml_go_yaml_v3", "org_golang_x_sys")
 
 # Container image base: distroless static on Debian 13, nonroot variant (user
 # 65532), pinned by index digest so a moving tag cannot change the image.

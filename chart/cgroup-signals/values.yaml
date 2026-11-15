@@ -97,3 +97,75 @@ tolerations:
 
 podAnnotations: {}
 podLabels: {}
+
+# The run-queue latency exporter: a second DaemonSet, off by default, of the
+# same image with --runqueue. It loads an eBPF program on the scheduler's
+# tracepoints, which the exporter above must never be able to do, so it is a
+# separate pod with its own security context. Values not set here (image,
+# imagePullSecrets, priorityClassName, nodeSelector, affinity, tolerations,
+# podAnnotations, podLabels, updateStrategy, terminationGracePeriodSeconds) are
+# the top-level ones.
+#
+# Metric: cgroup_signals_runqueue_latency_seconds, a histogram per pod and node
+# service (labels pod_uid, qos, cgroup; cgroup="other" is everything else).
+# Scrape the pods by the port name `runqueue`; any number of scrapers can read
+# it (nothing is reset).
+#
+# Needs: Linux 5.11+ with BTF (/sys/kernel/btf/vmlinux), the tp_btf
+# sched_wakeup, sched_wakeup_new and sched_switch tracepoints, and a namespace
+# that allows hostPath and added capabilities (Pod Security `privileged`). It
+# refuses to start, and the pod crash-loops with the reason in its log, if
+# those are missing. Cost: see README, "Run-queue latency".
+runqueue:
+  enabled: false
+
+  # Named `runqueue`; the exporter's is `metrics`, 9102, so both fit on a node.
+  port: 9103
+
+  rescanInterval: 15s
+
+  # One histogram (about 200 bytes per CPU) per tracked pod or service; beyond
+  # this the rest count in cgroup="other". At most 4095.
+  maxTrackedCgroups: 512
+
+  logLevel: info
+  extraArgs: []
+
+  # Hardening, not to be loosened by a release:
+  #   - capabilities: drop ALL, add BPF and PERFMON (to load the programs and
+  #     attach them to tracepoints) and nothing else; no CAP_SYS_ADMIN, no
+  #     CAP_SYS_RESOURCE, and NOT `privileged: true`: nothing needs it.
+  #   - uid/gid 0, because a container's capabilities are effective only for
+  #     root; allowPrivilegeEscalation false, a read-only root filesystem.
+  #   - /sys/fs/cgroup is a READ-ONLY hostPath: the program writes nothing to
+  #     the cgroup tree, it only learns the cgroups' ids from the directories'
+  #     inode numbers.
+  #   - no host network, PID or IPC; no Kubernetes API token.
+  # The runtime's default seccomp profile admits bpf(2) with CAP_BPF; if yours
+  # does not, set Unconfined here rather than adding capabilities.
+  seccompProfile: RuntimeDefault
+
+  # /healthz only, and unlike the exporter's /metrics a GET of /metrics is
+  # harmless here.
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: runqueue
+    initialDelaySeconds: 10
+    periodSeconds: 20
+    timeoutSeconds: 3
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: runqueue
+    periodSeconds: 10
+    timeoutSeconds: 3
+
+  # The maps are charged to this container's memory cgroup (about 2 MB with the
+  # defaults); the rest is the Go heap.
+  resources:
+    requests:
+      cpu: 20m
+      memory: 48Mi
+    limits:
+      memory: 128Mi

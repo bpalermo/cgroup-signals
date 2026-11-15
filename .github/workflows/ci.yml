@@ -228,6 +228,42 @@ jobs:
         if: needs.diff.outputs.has_test == 'true'
         run: bazel test --config=ci --target_pattern_file="${RUNNER_TEMP}/impacted/impacted_test.txt"
 
+  # The run-queue eBPF program, loaded into the runner's kernel. `bazel test`
+  # cannot do it (a test is not root), and the verifier and CO-RE relocations
+  # are the part of the program the unit tests cannot check: this runs the
+  # test binary under sudo (GitHub's runners have it, without a password).
+  # TestKernelBTF, in `build`, already fails without root if the runner's BTF
+  # lacks a field the program reads; this is the load itself. Always run, not
+  # scoped by `diff`: the kernel is part of the input.
+  bpf-load:
+    name: bpf-load
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-bpf-load
+          repository-cache: true
+          cache-save: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: build the run-queue test
+        run: bazel build --config=ci //cgroup-signals/internal/runqlat:runqlat_test
+
+      # -test.run Load: TestLoad, and a failure to load (or no delay counted
+      # for a process that waited for a CPU) fails the job. A skip is a
+      # failure too: the point is that it ran.
+      - name: load and attach the program as root
+        run: |
+          uname -r
+          test_bin="$(bazel info --config=ci bazel-bin)/cgroup-signals/internal/runqlat/runqlat_test_/runqlat_test"
+          out="$(sudo "${test_bin}" -test.v -test.run '^TestLoad$' 2>&1)" || { echo "${out}"; exit 1; }
+          echo "${out}"
+          grep -q -- '--- PASS: TestLoad' <<<"${out}" || { echo "::error::TestLoad did not run and pass" >&2; exit 1; }
+
   # The single check a ruleset should require. A required status check is
   # matched by check-run name, so requiring the jobs themselves ties the
   # ruleset to their names; requiring one aggregate leaves the jobs free to
@@ -242,7 +278,7 @@ jobs:
   # `success`.
   ci:
     name: ci
-    needs: [lint, diff, build]
+    needs: [lint, diff, build, bpf-load]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -251,12 +287,14 @@ jobs:
           LINT: ${{ needs.lint.result }}
           DIFF: ${{ needs.diff.result }}
           BUILD: ${{ needs.build.result }}
+          BPF_LOAD: ${{ needs.bpf-load.result }}
           HAS_ANY: ${{ needs.diff.outputs.has_any }}
         run: |
-          echo "lint=${LINT} diff=${DIFF} build=${BUILD} has_any='${HAS_ANY}'"
+          echo "lint=${LINT} diff=${DIFF} build=${BUILD} bpf-load=${BPF_LOAD} has_any='${HAS_ANY}'"
           ok=1
           [ "${LINT}" = success ] || { echo "::error::lint reported '${LINT}'" >&2; ok=0; }
           [ "${DIFF}" = success ] || { echo "::error::diff reported '${DIFF}'" >&2; ok=0; }
+          [ "${BPF_LOAD}" = success ] || { echo "::error::bpf-load reported '${BPF_LOAD}'" >&2; ok=0; }
           case "${BUILD}:${HAS_ANY}" in
             success:true | skipped:false) ;;
             *) echo "::error::build reported '${BUILD}' with has_any '${HAS_ANY}'" >&2; ok=0 ;;

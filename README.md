@@ -10,9 +10,9 @@ arm64 Raspberry Pi CM4 nodes). The signals:
   `POLLPRI`);
 - the `memory.events` counters (`high`, `max`, `oom_kill`, ...);
 - a run-queue latency histogram per cgroup, from a CO-RE eBPF program on the
-  `sched_wakeup` and `sched_switch` tracepoints.
-
-All but the eBPF histogram are implemented.
+  `sched_wakeup` and `sched_switch` tracepoints. It is a separate mode,
+  `--runqueue`, that runs as its own DaemonSet with its own, smaller set of
+  privileges, and is off by default (see "Run-queue latency").
 
 The kubelet's cAdvisor already exports each container's cumulative PSI
 counters and lifetime `memory.peak`; cgroup-signals does not repeat them. What
@@ -128,7 +128,8 @@ multiples) rides the 2 s averaging work instead and needs no thread.
 | `--listen` | `:9102` | address of `/metrics` and `/healthz` |
 | `--cgroup-root` | `/sys/fs/cgroup` | the cgroup v2 root; the DaemonSet passes `/host/sys/fs/cgroup` |
 | `--rescan-interval` | `15s` | how often to rescan the cgroup tree |
-| `--max-tracked-cgroups` | `512` | most cgroups tracked at once (three descriptors each); `0` is no cap |
+| `--max-tracked-cgroups` | `512` | most cgroups tracked at once (three descriptors each; with `--runqueue`, one histogram each, at most 4095); `0` is no cap |
+| `--runqueue` | off | run the run-queue latency exporter (eBPF) instead of the memory and PSI exporter; the PSI flags are then ignored, and `--cgroup-root` can be read-only |
 | `--psi-threshold-us` | `100000` | PSI trigger stall threshold, in microseconds |
 | `--psi-window-us` | `1000000` | PSI trigger window, in microseconds: 500 ms to 10 s, a multiple of 2 s without `CAP_SYS_RESOURCE` |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
@@ -150,6 +151,104 @@ triggers), so it needs:
 
 `privileged: true` covers all of it. Nothing else is needed: no host PID or
 network namespace, and no Kubernetes API access.
+
+## Run-queue latency
+
+`cgroup-signals --runqueue` loads an eBPF program on the scheduler's
+tracepoints and exports, per tracked cgroup, how long its tasks waited between
+becoming runnable and getting on a CPU. That wait is what CPU pressure is made
+of, and unlike PSI's averages it is a distribution: a few 5 ms waits and a
+steady trickle of 50 us waits are different problems.
+
+It is a different process from the default exporter on purpose. It runs
+nothing of the memory-peak or PSI code, needs no write access to the cgroup
+tree and none of that exporter's capabilities; the default exporter in turn
+never gets `CAP_BPF`. Run it as its own DaemonSet (the chart's
+`runqueue.enabled`), on another port (9103).
+
+### Metric
+
+| Metric | Type | Labels | |
+| --- | --- | --- | --- |
+| `cgroup_signals_runqueue_latency_seconds` | histogram | `pod_uid`, `qos`, `cgroup` | run-queue latency of the tasks of the cgroup and everything under it |
+| `cgroup_signals_runqueue_tracked_cgroups` | gauge | | cgroups with a histogram, not counting `other` |
+| `cgroup_signals_runqueue_missed_total` | counter | | switches to a task whose wakeup was not seen (already runnable when the program attached); not in the histograms |
+| `cgroup_signals_runqueue_scan_errors_total` | counter | `op` | `discover`, `inode`, `limit`, `map`, `read` |
+
+The histogram's classic buckets are the program's log2 slots: `le` is 2e-06,
+4e-06, 8e-06, ... 8.388608 seconds (2^1 to 2^23 microseconds, 22 finite
+buckets and `+Inf`), `_sum` is exact. It is cumulative since the cgroup was
+first tracked (read at scrape, nothing is reset, any number of scrapers can read
+it). The labels are the other metrics': a pod is `pod_uid` and `qos`, a node
+service (`kubelet`, `runtime`, `system`, `init`) is `cgroup`, and
+`cgroup="other"` is everything else: the QoS cgroups' own tasks, the root,
+kernel threads, anything past `--max-tracked-cgroups`.
+
+A latency is counted in the cgroup of the task that was waiting, at the moment
+it gets on the CPU, resolved to the nearest tracked ancestor: a container's
+delay lands in its pod's histogram. A delay is counted when the task is woken
+(`sched_wakeup`, `sched_wakeup_new`), and again when it is preempted while
+still runnable (`sched_switch` with the task in `TASK_RUNNING`); a task that
+blocks is counted from its next wakeup. The time a woken task spends before it
+is picked is the run-queue latency; the time on the CPU is not.
+
+```promql
+# p99 run-queue latency of each pod over 5 minutes
+histogram_quantile(0.99,
+  sum by (le, pod_uid) (rate(cgroup_signals_runqueue_latency_seconds_bucket{pod_uid!=""}[5m])))
+
+# where the node's run-queue delay lands: seconds of waiting per second
+sum by (pod_uid, cgroup) (rate(cgroup_signals_runqueue_latency_seconds_sum[5m]))
+
+# the share of wakeups that waited over 1 ms
+1 - sum by (pod_uid, cgroup) (rate(cgroup_signals_runqueue_latency_seconds_bucket{le="0.001048576"}[5m]))
+  / sum by (pod_uid, cgroup) (rate(cgroup_signals_runqueue_latency_seconds_count[5m]))
+```
+
+### Requirements and privileges
+
+- Linux 5.11 or later (maps are charged to the memory cgroup, not to
+  `RLIMIT_MEMLOCK`), built with BTF: `/sys/kernel/btf/vmlinux` must be readable
+  (it is, in a container, unless the runtime masks it), and the `sched_wakeup`,
+  `sched_wakeup_new` and `sched_switch` BTF tracepoints must exist. Without them
+  the process exits at start with an error that says which is missing.
+- `CAP_BPF` and `CAP_PERFMON`, uid 0 (a container's capabilities are effective
+  only for root). Not `privileged: true`, not `CAP_SYS_ADMIN`, not
+  `CAP_SYS_RESOURCE`. The runtime's default seccomp profile admits `bpf(2)`
+  with `CAP_BPF`.
+- The host's `/sys/fs/cgroup`, read-only: it is listed, and each directory
+  `stat`ed for its inode number, which is the cgroup's id in the kernel
+  (on a 64-bit kernel).
+
+### How it works, and what it costs
+
+`sched_wakeup` and `sched_wakeup_new` store `ktime` in a hash map by thread id.
+`sched_switch` first does the same for the task leaving the CPU if it is still
+runnable, then looks up the incoming task's timestamp, deletes it, finds the
+histogram of the task's cgroup (one or two hash lookups for a tracked cgroup or
+a container it has resolved before; a walk up at most 8 parents the first time,
+and every time for a task under no tracked cgroup) and adds the delay to a per-CPU log2 histogram: no atomic, no lock.
+The loader reads and sums the per-CPU copies at scrape time.
+
+Overhead, **estimated, not measured on a Pi**: on the order of a few hundred
+nanoseconds per wakeup and per switch on a Cortex-A72 (a hash update or lookup
+and a handful of loads each). At the tens of thousands of switches per second
+of a busy 4-core node that is around a percent of one core, under 0.5% of the
+node; it grows linearly with the switch rate, so a fork-heavy node is the one to
+watch. Measure it on
+your nodes with `sysctl kernel.bpf_stats_enabled=1` and `bpftool prog show`
+(`run_time_ns / run_cnt` per program; `cgroup_signals`' own
+`process_cpu_seconds_total` is the user-space half, one pass per scrape and one
+`stat` per tracked cgroup per rescan). Memory, also an estimate: the maps hold
+about 1.5 MB with the defaults (the wakeup table's 16384 entries dominate),
+charged to the pod.
+
+Limits: the first delays after start miss tasks that were already runnable;
+`start` has 16384 slots, so a node with more simultaneously runnable threads
+loses wakeups (`missed_total`); a pod that starts running between two
+rescans (15 s) counts in `other` until the next rescan tracks it (its
+containers, once it is tracked, count in its histogram from their first
+switch).
 
 ## Example queries
 
@@ -223,12 +322,24 @@ Scrape the pods by their port name (`metrics`, `9102`), e.g. a Prometheus
   second scraper (another Prometheus, a `curl`, a health check) steals peaks
   from the first and leaves both with gaps. Scrape it from one place only.
 - The probes use `/healthz`, never `/metrics`, for the same reason.
+- **`runqueue.enabled`** adds the run-queue exporter as a second DaemonSet,
+  `<release>-cgroup-signals-runqueue` (`app.kubernetes.io/name:
+  cgroup-signals-runqueue`, so neither DaemonSet's selector matches the other's
+  pods), off by default: with it off the chart renders exactly what it did
+  before. Its container runs the same image with `--runqueue`, capabilities
+  `drop: [ALL]` and `add: [BPF, PERFMON]`, no `privileged`, the host's
+  `/sys/fs/cgroup` mounted **read-only**, probes on `/healthz`, and the port
+  `runqueue` (9103). The namespace must allow hostPath and added capabilities
+  (Pod Security `privileged`). It shares the top-level `image`, `nodeSelector`,
+  `tolerations`, `priorityClassName`, `podLabels` and the rest; its own values
+  are under `runqueue.` (`port`, `rescanInterval`, `maxTrackedCgroups`,
+  `logLevel`, `extraArgs`, `resources`, `seccompProfile`, probes).
 - Values (`chart/cgroup-signals/values.yaml`): `port`, `psi.thresholdUs`,
   `psi.windowUs`, `rescanInterval`, `maxTrackedCgroups`, `logLevel`,
   `extraArgs`, `privileged`, `resources` (10m / 32Mi requests, 96Mi memory
   limit), `priorityClassName`, `nodeSelector`, `affinity`, `tolerations`
   (default: every node), `podAnnotations`, `podLabels`, `image.tag` (an
-  override of the digest, for trying a build).
+  override of the digest, for trying a build), and `runqueue.*` (above).
 
 ## Development
 

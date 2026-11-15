@@ -1,0 +1,106 @@
+{{- if .Values.runqueue.enabled }}
+{{- include "cgroup-signals.checkRunqueue" . }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cgroup-signals.runqueueName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cgroup-signals.runqueueLabels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "cgroup-signals.runqueueSelectorLabels" . | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cgroup-signals.runqueueLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # No Kubernetes API client: no token, no ServiceAccount, no RBAC.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        # uid 0: a container's capabilities are effective only for root.
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: {{ .Values.runqueue.seccompProfile }}
+      containers:
+        - name: cgroup-signals-runqueue
+          image: {{ include "cgroup-signals.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --runqueue
+            - --listen=:{{ .Values.runqueue.port }}
+            - --cgroup-root=/host/sys/fs/cgroup
+            - --rescan-interval={{ .Values.runqueue.rescanInterval }}
+            - --max-tracked-cgroups={{ .Values.runqueue.maxTrackedCgroups | int64 }}
+            - --log-level={{ .Values.runqueue.logLevel }}
+            {{- range .Values.runqueue.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: runqueue
+              containerPort: {{ .Values.runqueue.port }}
+              protocol: TCP
+          {{- with .Values.runqueue.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.runqueue.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              # Load and attach the tp_btf programs. Not privileged, not
+              # CAP_SYS_ADMIN, and not CAP_SYS_RESOURCE: on Linux 5.11+ the maps
+              # are charged to the cgroup's memory, not to RLIMIT_MEMLOCK.
+              add: [BPF, PERFMON]
+          resources:
+            {{- toYaml .Values.runqueue.resources | nindent 12 }}
+          terminationMessagePolicy: FallbackToLogsOnError
+          volumeMounts:
+            - name: cgroup
+              mountPath: /host/sys/fs/cgroup
+              # Only read: the cgroup tree is listed and stat'ed for the
+              # directories' inode numbers.
+              readOnly: true
+      volumes:
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

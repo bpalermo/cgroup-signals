@@ -41,6 +41,7 @@ type config struct {
 	rescanInterval time.Duration
 	maxTracked     int
 	trigger        psi.Trigger
+	runqueue       bool
 }
 
 // errVersion means --version was given and printed.
@@ -57,11 +58,12 @@ func parseFlags(args []string) (config, error) {
 	)
 	fs.StringVar(&cfg.listen, "listen", ":9102", "address of the /metrics and /healthz endpoint")
 	fs.StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn or error")
-	fs.StringVar(&cfg.cgroupRoot, "cgroup-root", "/sys/fs/cgroup", "the cgroup v2 root, mounted read-write")
+	fs.StringVar(&cfg.cgroupRoot, "cgroup-root", "/sys/fs/cgroup", "the cgroup v2 root, mounted read-write (read-only with --runqueue)")
 	fs.DurationVar(&cfg.rescanInterval, "rescan-interval", 15*time.Second, "how often to rescan the cgroup tree")
-	fs.IntVar(&cfg.maxTracked, "max-tracked-cgroups", 512, "most cgroups tracked at once, each holding three file descriptors (0: no cap)")
+	fs.IntVar(&cfg.maxTracked, "max-tracked-cgroups", 512, "most cgroups tracked at once, each holding three file descriptors, or one run-queue histogram with --runqueue (0: no cap)")
 	fs.UintVar(&thresholdUS, "psi-threshold-us", 100000, "PSI trigger: stall time within the window, in microseconds, that raises an event")
 	fs.UintVar(&windowUS, "psi-window-us", 1000000, "PSI trigger: window in microseconds; a multiple of 2 s unless the process has CAP_SYS_RESOURCE")
+	fs.BoolVar(&cfg.runqueue, "runqueue", false, "run the run-queue latency exporter (eBPF; needs CAP_BPF and CAP_PERFMON) instead of the memory and PSI exporter; the PSI flags are then ignored")
 	fs.BoolVar(&showVersion, "version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
@@ -80,6 +82,9 @@ func parseFlags(args []string) (config, error) {
 		return cfg, errors.New("-psi-threshold-us and -psi-window-us must fit in 32 bits")
 	}
 	cfg.trigger = psi.Trigger{ThresholdUS: uint32(thresholdUS), WindowUS: uint32(windowUS)}
+	if cfg.runqueue {
+		return cfg, nil
+	}
 	return cfg, validateTrigger(cfg.trigger)
 }
 
@@ -103,6 +108,9 @@ func run(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.logLevel}))
+	if cfg.runqueue {
+		return runRunqueue(cfg, log)
+	}
 	log.Info("starting", "version", version.Version, "cgroup_root", cfg.cgroupRoot, "psi_trigger", cfg.trigger.String())
 
 	if err := cgroupfs.CheckV2(cfg.cgroupRoot); err != nil {
