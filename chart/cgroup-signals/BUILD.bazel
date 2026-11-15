@@ -101,6 +101,23 @@ helm_template(
     ],
 )
 
+# Top-level scheduling set, the run-queue overrides left empty: the run-queue
+# pod inherits the exporter's nodeSelector and affinity.
+helm_template(
+    name = "rendered_runqueue_inherit",
+    chart = ":cgroup-signals",
+    opts = [
+        "--namespace",
+        "cgroup-signals",
+        "--set",
+        "runqueue.enabled=true",
+        "--set",
+        "nodeSelector.zone=a",
+        "--set-json",
+        "affinity={\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"top\",\"operator\":\"Exists\"}]}]}}}",
+    ],
+)
+
 helm_template(
     name = "rendered_runqueue_options",
     chart = ":cgroup-signals",
@@ -123,6 +140,10 @@ helm_template(
         "nodeSelector.zone=a",
         "--set",
         "runqueue.nodeSelector.node=n1",
+        "--set-json",
+        "affinity={\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"top\",\"operator\":\"Exists\"}]}]}}}",
+        "--set-json",
+        "runqueue.affinity={\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"rq\",\"operator\":\"Exists\"}]}]}}}",
         "--set",
         "priorityClassName=system-node-critical",
         "--set",
@@ -147,6 +168,7 @@ go_test(
         ":rendered_default",
         ":rendered_privileged",
         ":rendered_runqueue",
+        ":rendered_runqueue_inherit",
         ":rendered_runqueue_options",
     ],
     deps = ["@in_yaml_go_yaml_v3//:yaml"],
