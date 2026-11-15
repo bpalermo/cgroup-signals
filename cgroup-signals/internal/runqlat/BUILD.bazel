@@ -40,6 +40,7 @@ go_test(
     embed = [":runqlat"],
     deps = [
         "@com_github_cilium_ebpf//:ebpf",
+        "@com_github_cilium_ebpf//asm",
         "@com_github_cilium_ebpf//btf",
         "@com_github_cilium_ebpf//link",
         "@com_github_prometheus_client_golang//prometheus",

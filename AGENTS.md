@@ -105,11 +105,14 @@ How it works, because the C and the Go depend on each other:
   cgroups it discovers; a task's cgroup is looked up, then its ancestors' up to
   `MAX_DEPTH`, and what is under none counts in index 0 ("other"). A
   container's resolution is remembered in the LRU map `below` (hits only, tagged with `gen`).
-  Each task also remembers its own: the enqueue time and the resolved index
-  live in task local storage (`tasks`), valid while the task's cgroup id is the
-  same and the `gen` array's value equals the one stored with it. The loader
-  (`Program.SetTracked`/`DeleteTracked`) adds one to `gen` AFTER every change
-  to `tracked`; the program reads `gen` BEFORE it resolves. Keep that order,
+  Each thread also remembers its own: the enqueue time and the resolved index
+  live in the array `tids` (by tid, sized by the loader to `pid_max`, 32 bytes
+  an entry; plain array on purpose: task local storage cost more on the Pi),
+  valid while the thread's cgroup id is the same and the global `tracked_gen`
+  equals the one stored with it. The loader (`Program.SetTracked`/
+  `DeleteTracked`) adds one to `tracked_gen` (a `.bss` variable, written
+  through `ebpf.Variable`) AFTER every change to `tracked`; the program reads
+  it BEFORE it resolves. Keep that order,
   or a reused index or a newly tracked cgroup is counted wrong
   (`TestCacheInvalidation`). `TestMeasure` (env `RUNQLAT_BENCH_OBJECT`) is the
   cost benchmark the `bpf-load` job runs on the base and head objects.

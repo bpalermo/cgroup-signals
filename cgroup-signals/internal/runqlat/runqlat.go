@@ -18,6 +18,8 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/cilium/ebpf"
@@ -94,10 +96,10 @@ type Store interface {
 
 // objects are the maps and programs of the object, by their names in the C.
 type objects struct {
-	Tracked *ebpf.Map `ebpf:"tracked"`
-	Gen     *ebpf.Map `ebpf:"gen"`
-	Hists   *ebpf.Map `ebpf:"hists"`
-	Missed  *ebpf.Map `ebpf:"missed"`
+	Tracked *ebpf.Map      `ebpf:"tracked"`
+	Gen     *ebpf.Variable `ebpf:"tracked_gen"`
+	Hists   *ebpf.Map      `ebpf:"hists"`
+	Missed  *ebpf.Map      `ebpf:"missed"`
 
 	Wakeup    *ebpf.Program `ebpf:"sched_wakeup"`
 	WakeupNew *ebpf.Program `ebpf:"sched_wakeup_new"`
@@ -111,7 +113,7 @@ func (o *objects) close() error {
 			errs = append(errs, p.Close())
 		}
 	}
-	for _, m := range []*ebpf.Map{o.Tracked, o.Gen, o.Hists, o.Missed} {
+	for _, m := range []*ebpf.Map{o.Tracked, o.Hists, o.Missed} {
 		if m != nil {
 			errs = append(errs, m.Close())
 		}
@@ -145,6 +147,11 @@ func Check() error {
 // and CAP_PERFMON, and Linux 5.11 or later (older kernels charge the maps
 // against RLIMIT_MEMLOCK, which Load does not raise).
 func Load(maxCgroups int) (*Program, error) {
+	return load(maxCgroups, tidSlots())
+}
+
+// load is Load with the size of the per-thread array given.
+func load(maxCgroups int, tids uint32) (*Program, error) {
 	if maxCgroups < 1 || maxCgroups >= MaxCgroups {
 		return nil, fmt.Errorf("max tracked cgroups %d is outside 1..%d", maxCgroups, MaxCgroups-1)
 	}
@@ -157,6 +164,7 @@ func Load(maxCgroups int) (*Program, error) {
 	}
 	spec.Maps["hists"].MaxEntries = uint32(maxCgroups) + 1
 	spec.Maps["tracked"].MaxEntries = uint32(maxCgroups)
+	spec.Maps["tids"].MaxEntries = tids
 
 	p := &Program{}
 	if err := spec.LoadAndAssign(&p.objs, nil); err != nil {
@@ -178,6 +186,27 @@ func Load(maxCgroups int) (*Program, error) {
 		p.links = append(p.links, l)
 	}
 	return p, nil
+}
+
+// maxTidSlots caps the per-thread array (32 bytes a slot, 32 MiB at the cap):
+// on a kernel with a larger pid_max (up to 4194304) the tids above it use the
+// program's LRU hash, slower but just as exact.
+const maxTidSlots = 1 << 20
+
+// tidSlots is the size of the per-thread array: the kernel's pid_max, which no
+// tid reaches, within [32768, maxtidSlots].
+func tidSlots() uint32 {
+	return tidSlotsFor(os.ReadFile)
+}
+
+func tidSlotsFor(read func(string) ([]byte, error)) uint32 {
+	n := uint32(32768)
+	if b, err := read("/proc/sys/kernel/pid_max"); err == nil {
+		if v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32); err == nil {
+			n = uint32(min(max(v, 32768), maxTidSlots))
+		}
+	}
+	return n
 }
 
 func loadHint(err error) string {
@@ -213,7 +242,7 @@ func (p *Program) bumpGen() error {
 	p.gen++
 	var err error
 	for range 3 {
-		if err = p.objs.Gen.Put(uint32(0), p.gen); err == nil {
+		if err = p.objs.Gen.Set(p.gen); err == nil {
 			return nil
 		}
 	}

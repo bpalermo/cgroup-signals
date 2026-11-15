@@ -37,13 +37,16 @@ func TestObject(t *testing.T) {
 		}
 	}
 	for name, typ := range map[string]ebpf.MapType{
-		"tracked": ebpf.Hash, "below": ebpf.LRUHash, "tasks": ebpf.TaskStorage, "gen": ebpf.Array,
+		"tracked": ebpf.Hash, "below": ebpf.LRUHash, "tids": ebpf.Array, "tids_hi": ebpf.LRUHash,
 		"hists": ebpf.PerCPUArray, "missed": ebpf.PerCPUArray,
 	} {
 		m := spec.Maps[name]
 		if m == nil || m.Type != typ {
 			t.Errorf("map %s: %v, want type %v", name, m, typ)
 		}
+	}
+	if m := spec.Maps["tids"]; m == nil || m.ValueSize != 32 {
+		t.Errorf("tids value size is %v, want 32 (one entry, half a cache line)", m)
 	}
 	// The Go and C sides of the histogram agree.
 	m := spec.Maps["hists"]
@@ -152,5 +155,65 @@ func busy(d time.Duration) {
 	end := time.Now().Add(d)
 	for time.Now().Before(end) {
 		time.Sleep(200 * time.Microsecond)
+	}
+}
+
+func TestTidSlots(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		err  error
+		want uint32
+	}{
+		{"32768\n", nil, 32768},
+		{"4194304\n", nil, maxTidSlots},
+		{"1000\n", nil, 32768},
+		{"junk", nil, 32768},
+		{"", os.ErrNotExist, 32768},
+	} {
+		got := tidSlotsFor(func(string) ([]byte, error) { return []byte(c.in), c.err })
+		if got != c.want {
+			t.Errorf("pid_max %q (err %v): %d slots, want %d", c.in, c.err, got, c.want)
+		}
+	}
+}
+
+// TestHighTids loads with a per-thread array of one slot, so that every tid
+// takes the program's LRU-hash path (the one for tids above the array on a
+// huge pid_max), and checks delays are still counted, and not as missed.
+func TestHighTids(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root; see TestLoad")
+	}
+	if err := Check(); err != nil {
+		t.Skip(err)
+	}
+	p, err := load(16, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := p.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	id := ownCgroupID(t)
+	if err := p.Reset(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetTracked(id, 1); err != nil {
+		t.Fatal(err)
+	}
+	busy(200 * time.Millisecond)
+	h, err := p.Hist(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missed, err := p.Missed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d delays counted, %d missed", h.Count(), missed)
+	if h.Count() < 100 {
+		t.Errorf("only %d delays counted through the hash path", h.Count())
 	}
 }

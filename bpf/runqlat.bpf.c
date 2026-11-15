@@ -21,7 +21,7 @@
 // is under no tracked cgroup counts in index 0 ("other"); the histogram is
 // per CPU, so the hot path takes no atomic; and it records the sum of the
 // delays, for a Prometheus histogram's _sum. The per-event cost is kept low by
-// keeping what is per task in task local storage (the enqueue time and the
+// keeping what is per thread in an array by tid (the enqueue time and the
 // resolved histogram index) instead of hash maps, and by resolving the cgroup
 // only at the switch that records a delay.
 #include "vmlinux.h"
@@ -38,37 +38,49 @@
 
 #define TASK_RUNNING 0
 
-/* Per task: when it became runnable, and the histogram index it counted in
- * last time, with the cgroup and the generation that index was resolved for.
- * Task local storage: no hash lookup on the hot path, and the kernel frees the
- * entry with the task, so there is no table to fill up or to clean. A task is
- * runnable from its wakeup (or preemption) to the switch that puts it on a
- * CPU, which always comes: a task cannot exit without running. */
+/* Per thread, by tid: when it became runnable, and the histogram index it
+ * counted in last time, with the cgroup and the generation that index was
+ * resolved for. A plain array: the lookup is inlined by the verifier (no
+ * helper call, no hashing, no pointer chase through the task's local storage,
+ * which on a small core is several cache misses), and one entry is one cache
+ * line. The loader sizes it to the kernel's pid_max; a tid beyond it is not
+ * timed (counted in missed). Nothing is cleaned: a thread is runnable from its
+ * wakeup (or preemption) to the switch that puts it on a CPU, which always
+ * comes, and what is remembered about the cgroup is a function of the cgroup
+ * and the generation alone, so a tid reused by another task is harmless. */
 struct task_info {
 	__u64 ts;   /* ktime when it became runnable; 0: not waiting */
 	__u64 cgid; /* the cgroup idx was resolved for; 0: never */
 	__u32 idx;
-	__u32 gen;  /* the value of gen when idx was resolved */
+	__u32 gen;  /* the value of tracked_gen when idx was resolved */
+	__u64 pad;
 };
 
 struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 32768);
+	__type(key, __u32);
 	__type(value, struct task_info);
-} tasks SEC(".maps");
+} tids SEC(".maps");
+
+/* The tids the array does not reach (the loader caps it below a huge pid_max):
+ * the same record in an LRU hash, slower and rarely used, so that coverage
+ * does not depend on how high the kernel's PID allocator has climbed. The
+ * LRU evicts the entries of threads that are gone. */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u32);
+	__type(value, struct task_info);
+} tids_hi SEC(".maps");
 
 /* The generation of the tracked map: the loader adds one after every change to
- * it (a cgroup tracked or dropped), so a resolution remembered in tasks is
- * used only while nothing it depended on can have changed. The program reads
- * it BEFORE it resolves, so a change racing a resolution makes the remembered
- * result stale, never wrong. */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, __u32);
-} gen SEC(".maps");
+ * it (a cgroup tracked or dropped), so a resolution remembered above is used
+ * only while nothing it depended on can have changed. The program reads it
+ * BEFORE it resolves, so a change racing a resolution makes the remembered
+ * result stale, never wrong. A global (the .bss map value, read with two
+ * instructions), written by the loader. */
+volatile __u32 tracked_gen;
 
 /* cgroup id -> histogram index, filled by the loader with the tracked
  * cgroups. */
@@ -143,13 +155,30 @@ static __always_inline long task_state(struct task_struct *t)
 	return t->__state;
 }
 
+/* A tid beyond the array. */
+static __noinline void enqueue_hi(__u32 tid, __u64 now)
+{
+	struct task_info *ti = bpf_map_lookup_elem(&tids_hi, &tid);
+	struct task_info n = {};
+
+	if (ti) {
+		ti->ts = now;
+		return;
+	}
+	n.ts = now;
+	bpf_map_update_elem(&tids_hi, &tid, &n, BPF_ANY);
+}
+
 static __always_inline void enqueue(struct task_struct *t, __u64 now)
 {
-	struct task_info *ti;
+	__u32 tid = t->pid;
+	struct task_info *ti = bpf_map_lookup_elem(&tids, &tid);
 
-	ti = bpf_task_storage_get(&tasks, t, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (ti)
+	if (ti) {
 		ti->ts = now;
+		return;
+	}
+	enqueue_hi(tid, now);
 }
 
 static __always_inline __u32 lookup(__u64 id)
@@ -193,12 +222,12 @@ static __always_inline __u32 resolve(struct kernfs_node *kn, __u32 gv)
 	return 0;
 }
 
-static __always_inline __u32 log2l(__u64 v)
+/* floor(log2(v)) of a 32-bit value (0 for 0): five compare-and-shifts,
+ * on 32-bit registers (a 64-bit one costs the compiler twice the code). */
+static __always_inline __u32 log2u32(__u32 v)
 {
 	__u32 r = 0;
 
-	/* The BPF verifier needs the loop bounded; 6 steps cover 64 bits. */
-	if (v >> 32) { v >>= 32; r += 32; }
 	if (v >> 16) { v >>= 16; r += 16; }
 	if (v >> 8) { v >>= 8; r += 8; }
 	if (v >> 4) { v >>= 4; r += 4; }
@@ -207,29 +236,35 @@ static __always_inline __u32 log2l(__u64 v)
 	return r;
 }
 
-/* ns / 1000. BPF has no 64-bit multiply-high, so clang leaves a 64-bit
- * division by a constant as a real division; for a 32-bit value the exact
- * reciprocal multiplication is three instructions (x * 274877907 >> 38 is
- * exact for every x below 2^32). Only delays of 4.3 s or more take the
- * division. */
-static __always_inline __u64 ns_to_us(__u64 ns)
+/* The slot of a delay of 4.3 seconds or more: the division the fast path
+ * avoids, out of line. */
+static __noinline __u32 slot_slow(__u64 ns)
 {
-	if (ns >> 32)
-		return ns / 1000;
-	return (ns * 274877907ULL) >> 38;
+	__u64 us = ns / 1000;
+	__u32 r;
+
+	if (us >> 32)
+		return MAX_SLOTS - 1;
+	r = log2u32((__u32)us);
+	return r < MAX_SLOTS ? r : MAX_SLOTS - 1;
 }
 
 static __always_inline void record(__u32 idx, __u64 delta_ns)
 {
-	__u32 slot = log2l(ns_to_us(delta_ns));
+	__u32 slot;
 	struct hist *h;
 
-	if (idx >= MAX_CGROUPS)
-		idx = 0;
+	/* ns / 1000 for a 32-bit ns is x * 274877907 >> 38, exact (BPF has no
+	 * 64-bit multiply-high, so clang would leave a real division). The
+	 * result is under 2^23, so the slot is under 23. */
+	if (delta_ns >> 32)
+		slot = slot_slow(delta_ns);
+	else
+		slot = log2u32((__u32)((delta_ns * 274877907ULL) >> 38));
 	h = bpf_map_lookup_elem(&hists, &idx);
 	if (!h)
 		return;
-	if (slot >= MAX_SLOTS)
+	if (slot >= MAX_SLOTS) /* never, but the verifier cannot know */
 		slot = MAX_SLOTS - 1;
 	/* Per CPU, and the program runs with migration disabled: no atomic. */
 	h->slots[slot]++;
@@ -264,7 +299,7 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 {
 	__u64 now = bpf_ktime_get_ns();
 	struct task_info *ti;
-	__u32 zero = 0, *g, gv, idx;
+	__u32 tid = next->pid, gv, idx;
 	struct kernfs_node *kn;
 	__s64 delta;
 	__u64 cgid;
@@ -276,9 +311,11 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 	if (prev->pid && (preempt || task_state(prev) == TASK_RUNNING))
 		enqueue(prev, now);
 
-	if (!next->pid)
+	if (!tid)
 		return 0;
-	ti = bpf_task_storage_get(&tasks, next, 0, 0);
+	ti = bpf_map_lookup_elem(&tids, &tid);
+	if (!ti)
+		ti = bpf_map_lookup_elem(&tids_hi, &tid);
 	if (!ti || !ti->ts) {
 		missed_one();
 		return 0;
@@ -288,12 +325,9 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 	if (delta < 0)
 		return 0;
 
-	/* The histogram index: remembered per task while the task is in the
+	/* The histogram index: remembered per thread while the task is in the
 	 * same cgroup and the tracked set has not changed since. */
-	g = bpf_map_lookup_elem(&gen, &zero);
-	if (!g)
-		return 0;
-	gv = *g; /* before resolving, once */
+	gv = tracked_gen; /* before resolving, once */
 	kn = next->cgroups->dfl_cgrp->kn;
 	cgid = kn ? kn->id : 0;
 	if (cgid && ti->cgid == cgid && ti->gen == gv) {
