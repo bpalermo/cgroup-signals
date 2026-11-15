@@ -419,40 +419,46 @@ the 6.18 sources, not read from a node); the kernel's verifier has not seen
 them, and none has run on a node. `bpftrace -l '<pattern>'` lists what your kernel has if one is
 refused. Output is per second or per 10 s where a `interval` probe says so.
 
-**Run-queue latency histogram (microseconds from wakeup, or preemption, to
-running again):**
+**Run-queue latency histogram (microseconds from wakeup, or from an
+involuntary preemption, to running again; the idle task is excluded):**
 
 ```
 bpftrace -e '
 tracepoint:sched:sched_wakeup, tracepoint:sched:sched_wakeup_new { @qtime[args->pid] = nsecs; }
 tracepoint:sched:sched_switch {
-  if (args->prev_state == 0) { @qtime[args->prev_pid] = nsecs; }
+  if (args->prev_pid != 0 && (args->prev_state & 0x100)) { @qtime[args->prev_pid] = nsecs; }
   $ns = @qtime[args->next_pid];
-  if ($ns) { @runq_us = hist((uint64)(nsecs - (uint64)$ns) / 1000); delete(@qtime[args->next_pid]); }
+  if (args->next_pid != 0 && $ns) { @runq_us = hist((uint64)(nsecs - (uint64)$ns) / 1000); }
+  delete(@qtime[args->next_pid]);
 }
 '
 ```
 
-**Who is being preempted while the CPU is contended** (`prev_state == 0` is a
-task that was still runnable when it was switched out; the pair is
-preempted, preemptor):
+**Who is being preempted while the CPU is contended** (`prev_state & 0x100` is
+`TASK_REPORT_MAX`, which the tracepoint sets on a task switched out while still
+runnable, that is preempted; the idle task is excluded; the pair is preempted,
+preemptor):
 
 ```
 bpftrace -e '
-tracepoint:sched:sched_switch /args->prev_state == 0/ { @preempted[args->prev_comm, args->next_comm] = count(); }
+tracepoint:sched:sched_switch /args->prev_pid != 0 && (args->prev_state & 0x100)/ { @preempted[args->prev_comm, args->next_comm] = count(); }
 interval:s:10 { print(@preempted, 20); clear(@preempted); }
 '
 ```
 
-**Off-CPU time by cgroup** (milliseconds slept or blocked, per 10 s; the
-cgroup path tells the pod from the kubelet or containerd):
+**Off-CPU time by cgroup** (milliseconds slept or blocked, per 10 s, charged
+to the cgroup the task left the CPU from, saved at switch-out and read back at
+switch-in; preempted tasks are not counted; the cgroup path tells the pod from
+the kubelet or containerd):
 
 ```
 bpftrace -e '
 tracepoint:sched:sched_switch {
-  if (args->prev_state != 0) { @start[args->prev_pid] = nsecs; }
+  if (args->prev_pid != 0 && (args->prev_state & 0xff)) { @start[args->prev_pid] = nsecs; @cg[args->prev_pid] = cgroup_path(cgroup); }
   $s = @start[args->next_pid];
-  if ($s) { @offcpu_ms[cgroup_path(cgroup)] = sum((uint64)(nsecs - (uint64)$s) / 1000000); delete(@start[args->next_pid]); }
+  if (args->next_pid != 0 && $s) { @offcpu_ms[@cg[args->next_pid]] = sum((uint64)(nsecs - (uint64)$s) / 1000000); }
+  delete(@start[args->next_pid]);
+  delete(@cg[args->next_pid]);
 }
 interval:s:10 { print(@offcpu_ms, 15); clear(@offcpu_ms); }
 '
