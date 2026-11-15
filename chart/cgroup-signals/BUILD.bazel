@@ -1,0 +1,117 @@
+load("@rules_go//go:def.bzl", "go_test")
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template", "helm_template_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel:registry.bzl", "CHART_REGISTRY_URL")
+
+# The chart, published as an OCI artifact to CHART_REGISTRY_URL/cgroup-signals
+# (oci://ghcr.io/bpalermo/charts/cgroup-signals) under the version Chart.yaml
+# stamps (0.1.0-dev.<commit time>.g<short commit>):
+#   bazel run //cgroup-signals:image_push                      # the image first
+#   bazel run //chart/cgroup-signals:cgroup-signals.push_registry
+# The image is pinned by digest at package time ({@//cgroup-signals:image_push.digest}
+# in values.yaml). Credentials: `helm registry login`, or Docker's (the publish
+# workflow logs in to ghcr.io).
+helm_chart(
+    name = "cgroup-signals",
+    chart = "Chart.yaml",
+    images = ["//cgroup-signals:image_push"],
+    registry_url = CHART_REGISTRY_URL,
+    stamp = 1,
+    values = "values.yaml",
+    visibility = ["//visibility:public"],
+)
+
+helm_lint_test(
+    name = "cgroup-signals_lint_test",
+    chart = ":cgroup-signals",
+)
+
+helm_template_test(
+    name = "cgroup-signals_template_test",
+    chart = ":cgroup-signals",
+)
+
+# privileged: the window may then be any multiple of 1 ms.
+helm_template_test(
+    name = "cgroup-signals_privileged_template_test",
+    chart = ":cgroup-signals",
+    opts = [
+        "--set",
+        "privileged=true",
+        "--set",
+        "psi.windowUs=1000000",
+    ],
+)
+
+# image.tag replaces the digest; the probes can be dropped.
+helm_template_test(
+    name = "cgroup-signals_tag_template_test",
+    chart = ":cgroup-signals",
+    opts = [
+        "--set",
+        "image.tag=dev",
+        "--set",
+        "livenessProbe=null",
+        "--set",
+        "readinessProbe=null",
+    ],
+)
+
+# The chart rendered for hardening_test.go: once with the defaults, once with
+# every option that changes the pod.
+helm_template(
+    name = "rendered_default",
+    chart = ":cgroup-signals",
+    opts = [
+        "--namespace",
+        "cgroup-signals",
+    ],
+)
+
+helm_template(
+    name = "rendered_privileged",
+    chart = ":cgroup-signals",
+    opts = [
+        "--namespace",
+        "cgroup-signals",
+        "--set",
+        "privileged=true",
+        "--set",
+        "psi.windowUs=1000000",
+        "--set",
+        "priorityClassName=system-node-critical",
+        "--set",
+        "podLabels.team=o11y",
+        "--set",
+        "podAnnotations.example=one",
+        "--set",
+        "extraArgs={--some-flag=x}",
+    ],
+)
+
+go_test(
+    name = "cgroup-signals_test",
+    srcs = ["hardening_test.go"],
+    data = [
+        ":rendered_default",
+        ":rendered_privileged",
+    ],
+    deps = ["@in_yaml_go_yaml_v3//:yaml"],
+)
+
+# `fail` guards: nothing upstream asserts that a render FAILS, so this runs
+# helm itself on the packaged chart.
+sh_test(
+    name = "render_guards_test",
+    size = "small",
+    srcs = ["render_guards_test.sh"],
+    args = [
+        "$(rlocationpath @helm//:helm)",
+        "$(rlocationpath :cgroup-signals)",
+    ],
+    data = [
+        ":cgroup-signals",
+        "@helm",
+    ],
+    deps = ["@rules_shell//shell/runfiles"],
+)

@@ -21,6 +21,19 @@ bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "aspect_rules_lint", version = "2.9.1")
 bazel_dep(name = "buildifier_prebuilt", version = "10.1.0")
 
+# Helm, for chart/cgroup-signals: packaged, linted, rendered and pushed by Bazel.
+bazel_dep(name = "rules_helm", version = "0.33.0")
+
+helm = use_extension("@rules_helm//helm:extensions.bzl", "helm")
+
+# Pinned, not rules_helm's default, so a rules_helm bump does not move helm
+# with it. The toolchains follow the same pin in .bazelrc
+# (@rules_helm//helm/settings:version): helm.toolchain takes no version.
+helm.host_tools(version = "4.2.0")
+use_repo(helm, "helm", "helm_toolchains")
+
+register_toolchains("@helm_toolchains//:all")
+
 # The Go toolchain, pinned here rather than read from go.mod: go.mod's `go`
 # line is the language version the module requires, this is the exact SDK
 # every build compiles with. Bump both together; the SDK must not be older
@@ -35,7 +48,7 @@ go_sdk.nogo(nogo = "//:nogo")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-use_repo(go_deps, "co_honnef_go_tools", "com_github_prometheus_client_golang", "com_github_prometheus_client_model", "com_github_uudashr_gocognit", "org_golang_x_sys")
+use_repo(go_deps, "co_honnef_go_tools", "com_github_prometheus_client_golang", "com_github_prometheus_client_model", "com_github_uudashr_gocognit", "in_yaml_go_yaml_v3", "org_golang_x_sys")
 
 # Container image base: distroless static on Debian 13, nonroot variant (user
 # 65532), pinned by index digest so a moving tag cannot change the image.

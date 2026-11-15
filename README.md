@@ -186,6 +186,50 @@ increase(cgroup_signals_psi_trigger_events_total{pod_uid!=""}[5m])
 `linux/amd64`) on a digest-pinned distroless static base. The `publish`
 workflow pushes it from `main` as `dev` and `dev-<commit>`.
 
+## Helm chart
+
+The `publish` workflow also pushes a Helm chart to
+`oci://ghcr.io/bpalermo/charts/cgroup-signals` (GHCR), after the image. Its
+version is `0.1.0-dev.<commit time>.g<short commit>` for a commit of `main` (the
+bare version for a tagged release), one per commit and never moved. The chart
+pins the multi-arch image that the same commit pushed **by digest**, so a chart
+version always runs the build it was made with. The publish job refuses to push
+a chart whose version or pinned digest is not the commit's
+(`bazel/verify-chart.sh`).
+
+```bash
+helm install cgroup-signals oci://ghcr.io/bpalermo/charts/cgroup-signals \
+  --version 0.1.0-dev.<commit time>.g<short commit> -n <ns>
+```
+
+It renders one DaemonSet and nothing else: no Service, ServiceMonitor,
+ServiceAccount or RBAC (there is no API client, so no token is mounted).
+Scrape the pods by their port name (`metrics`, `9102`), e.g. a Prometheus
+`kubernetes_sd_configs` `role: pod` that keeps the container port named
+`metrics`.
+
+- **The namespace must allow `hostPath` and uid 0**: Pod Security `privileged`
+  (baseline refuses `hostPath`). The pod mounts the host's `/sys/fs/cgroup`
+  read-write at `/host/sys/fs/cgroup`, because the `memory.peak` resets and the
+  PSI triggers are writes. It runs as uid 0 because the cgroup files are
+  root-owned, mode 0644, with `allowPrivilegeEscalation: false`, a read-only
+  root filesystem and every capability dropped. `CAP_SYS_RESOURCE` is not
+  needed: the chart's default PSI window is 2 s.
+- `privileged: true` adds `privileged: true` to the container. It is needed
+  only for a `psi.windowUs` that is not a multiple of 2 s (2000000); without it
+  such a value fails the render.
+- **One scraper owns the reset.** Every `GET /metrics` resets each cgroup's
+  `memory.peak`, so a scrape returns the peak since the *previous* scrape. A
+  second scraper (another Prometheus, a `curl`, a health check) steals peaks
+  from the first and leaves both with gaps. Scrape it from one place only.
+- The probes use `/healthz`, never `/metrics`, for the same reason.
+- Values (`chart/cgroup-signals/values.yaml`): `port`, `psi.thresholdUs`,
+  `psi.windowUs`, `rescanInterval`, `maxTrackedCgroups`, `logLevel`,
+  `extraArgs`, `privileged`, `resources` (10m / 32Mi requests, 96Mi memory
+  limit), `priorityClassName`, `nodeSelector`, `affinity`, `tolerations`
+  (default: every node), `podAnnotations`, `podLabels`, `image.tag` (an
+  override of the digest, for trying a build).
+
 ## Development
 
 Bazel is the only build; see [AGENTS.md](AGENTS.md).

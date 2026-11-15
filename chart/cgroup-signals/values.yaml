@@ -1,0 +1,99 @@
+# One pod per node. Read cgroup-signals' README ("Helm chart") first.
+#
+# ONE SCRAPER OWNS THE RESET. Every GET of /metrics resets each cgroup's
+# memory.peak, so the peak a scrape returns is the peak since the PREVIOUS
+# scrape. A second scraper (a curl, a second Prometheus, a probe) steals peaks
+# from the first. Scrape it from exactly one place.
+
+image:
+  repository: ghcr.io/bpalermo/cgroup-signals
+  # Pinned by digest at package time: the multi-arch index that the same commit
+  # pushed (//cgroup-signals:image_push), so a chart cannot run another image.
+  digest: "{@//cgroup-signals:image_push.digest}"
+  # Optional override, for trying another build; wins over the digest. A tag is
+  # mutable, so leave it empty in a deployment.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The metrics port (--listen=:<port>), named `metrics`: scrape the pods by that
+# port name (kubernetes_sd role pod). There is no Service and no ServiceMonitor.
+port: 9102
+
+# PSI triggers armed on every cgroup's cpu.pressure and memory.pressure.
+psi:
+  # Stall threshold within the window, microseconds (--psi-threshold-us).
+  thresholdUs: 100000
+  # The window, microseconds (--psi-window-us). A multiple of 2 s (2000000) needs
+  # no capability: the kernel rides its 2 s averaging work. Any other window needs
+  # CAP_SYS_RESOURCE and a real-time `psimon` kernel thread per cgroup, and so
+  # `privileged: true`; rendering fails otherwise.
+  windowUs: 2000000
+
+# How often the cgroup tree is rescanned for new and vanished pods (--rescan-interval).
+rescanInterval: 15s
+
+# Most cgroups tracked at once, three descriptors each; 0 is no cap
+# (--max-tracked-cgroups).
+maxTrackedCgroups: 512
+
+# debug, info, warn or error (--log-level).
+logLevel: info
+
+# Flags appended after the ones above, e.g. ["--some-flag=x"].
+extraArgs: []
+
+# Hardening, which is the chart's, not a release's to loosen except `privileged`:
+#   - /sys/fs/cgroup is a READ-WRITE hostPath (see the pod): the memory.peak
+#     resets and the PSI triggers are writes to the host's cgroupfs.
+#   - uid/gid 0, because the cgroup files are root-owned with mode 0644.
+#   - no capability is added, in particular no CAP_SYS_RESOURCE: the default PSI
+#     window is 2 s, which does not need it.
+#   - no host network, PID or IPC; no Kubernetes API token.
+# The namespace must therefore allow hostPath volumes and uid 0: Pod Security
+# `privileged` (the baseline level refuses hostPath).
+#
+# true adds `privileged: true` to the container. It is needed only for a PSI
+# window that is not a multiple of 2 s (CAP_SYS_RESOURCE).
+privileged: false
+
+# No probe on /metrics: a GET resets every memory peak. /healthz does not reset
+# anything and is what the probes use. Set either to null to drop it.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 20
+  timeoutSeconds: 3
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  periodSeconds: 10
+  timeoutSeconds: 3
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 96Mi
+
+terminationGracePeriodSeconds: 30
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+priorityClassName: ""
+nodeSelector: {}
+affinity: {}
+# Every node, control-plane included, whatever its taints.
+tolerations:
+  - operator: Exists
+
+podAnnotations: {}
+podLabels: {}

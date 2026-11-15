@@ -36,3 +36,7 @@ def image_reference(component):
       e.g. "ghcr.io/bpalermo/cgroup-signals".
     """
     return "{}/{}".format(IMAGE_REGISTRY, image_repository(component))
+
+# Where the chart is pushed, as an OCI artifact: `helm push` appends the
+# chart's name, so the chart is oci://ghcr.io/bpalermo/charts/cgroup-signals.
+CHART_REGISTRY_URL = "oci://{}/{}/charts".format(IMAGE_REGISTRY, IMAGE_NAMESPACE)

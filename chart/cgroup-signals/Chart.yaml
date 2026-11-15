@@ -1,0 +1,15 @@
+apiVersion: v2
+name: cgroup-signals
+description: |
+  Per-cgroup kernel signals (memory peak since the last scrape, PSI trigger
+  events, memory.events) as Prometheus metrics, one pod per node. See the
+  repository's README.md.
+type: application
+# Stamped at package time (`--stamp`, always on in .bazelrc) from
+# bazel/workspace_status.sh: 0.1.0-dev.<commit time>.g<short commit> for a
+# snapshot, the bare version for a release. One immutable chart version per
+# commit; a pushed version is never moved.
+version: "{STABLE_CHART_VERSION}"
+appVersion: "{STABLE_GIT_VERSION}"
+sources:
+  - https://github.com/bpalermo/cgroup-signals
