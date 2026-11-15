@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "appimage-closure_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/cgroup-signals/appimage-closure",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//appimage-closure/internal/closure",
+        "//appimage-closure/internal/tree",
+    ],
+)
+
+go_binary(
+    name = "appimage-closure",
+    embed = [":appimage-closure_lib"],
+    visibility = ["//visibility:public"],
+)

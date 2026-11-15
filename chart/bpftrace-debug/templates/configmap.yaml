@@ -1,0 +1,11 @@
+{{- if .Values.programFile }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bpftrace-debug.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bpftrace-debug.labels" . | nindent 4 }}
+data:
+  program.bt: {{ .Values.programFile | toJson }}
+{{- end }}

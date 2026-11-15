@@ -3,6 +3,7 @@ module github.com/bpalermo/cgroup-signals
 go 1.27.2
 
 require (
+	github.com/cilium/ebpf v0.22.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	go.yaml.in/yaml/v3 v3.0.5
@@ -11,12 +12,17 @@ require (
 
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
+	github.com/CalebQ42/squashfs v1.4.1
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/cilium/ebpf v0.22.0
+	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/mikelolasagasti/xz v1.0.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
+	github.com/rasky/go-lzo v0.0.0-20200203143853-96a758eda86e // indirect
+	github.com/ulikunitz/xz v0.5.12 // indirect
 	github.com/uudashr/gocognit v1.2.2 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260209203927-2842357ff358 // indirect
 	golang.org/x/mod v0.42.0 // indirect

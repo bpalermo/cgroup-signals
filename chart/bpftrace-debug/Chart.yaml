@@ -1,0 +1,13 @@
+apiVersion: v2
+name: bpftrace-debug
+description: |
+  An on-demand bpftrace debug pod pinned to one node: a privileged, hostPID
+  Pod that runs one bpftrace program and exits, or sleeps so you can
+  `kubectl exec` into it. Not a DaemonSet. See the repository's README.md,
+  "Debug pod (bpftrace)".
+type: application
+# Stamped at package time like chart/cgroup-signals: 0.1.0-dev.<commit time>.g<short commit>.
+version: "{STABLE_CHART_VERSION}"
+appVersion: "{STABLE_GIT_VERSION}"
+sources:
+  - https://github.com/bpalermo/cgroup-signals

@@ -1,0 +1,115 @@
+{{- include "bpftrace-debug.check" . }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "bpftrace-debug.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bpftrace-debug.labels" . | nindent 4 }}
+    {{- with .Values.podLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.podAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  nodeName: {{ .Values.node | quote }}
+  # The host's process table: bpftrace resolves pids, comms and cgroups of the
+  # node's own processes, not this container's.
+  hostPID: true
+  # No Kubernetes API client: no token, no ServiceAccount, no service links.
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  # A debug pod that ends is not restarted into a second run of the program.
+  restartPolicy: Never
+  activeDeadlineSeconds: {{ .Values.activeDeadlineSeconds | int64 }}
+  terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+  {{- with .Values.priorityClassName }}
+  priorityClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+  containers:
+    - name: bpftrace
+      image: {{ include "bpftrace-debug.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      {{- if .Values.program }}
+      command: ["/usr/local/bin/bpftrace"]
+      args:
+        {{- range .Values.args }}
+        - {{ . | quote }}
+        {{- end }}
+        - "-e"
+        - {{ .Values.program | quote }}
+      {{- else if .Values.programFile }}
+      command: ["/usr/local/bin/bpftrace"]
+      args:
+        {{- range .Values.args }}
+        - {{ . | quote }}
+        {{- end }}
+        - "/etc/bpftrace/program.bt"
+      {{- else }}
+      # Idle until the deadline; exec in to work. TERM and INT end it at once
+      # (a pid 1 with no handler would ignore them).
+      command: ["/busybox/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]
+      {{- end }}
+      securityContext:
+        # See values.yaml: bpftrace on Talos is not a capability-only job.
+        privileged: true
+      resources:
+        {{- toYaml .Values.resources | nindent 8 }}
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+        - name: debugfs
+          mountPath: /sys/kernel/debug
+        - name: tracefs
+          mountPath: /sys/kernel/tracing
+        - name: btf
+          mountPath: /sys/kernel/btf
+          readOnly: true
+        - name: cgroup
+          mountPath: /sys/fs/cgroup
+          readOnly: true
+        - name: modules
+          mountPath: /lib/modules
+          readOnly: true
+        {{- if .Values.programFile }}
+        - name: program
+          mountPath: /etc/bpftrace
+          readOnly: true
+        {{- end }}
+  volumes:
+    # debugfs is not mounted on every node image; with no type the kubelet
+    # does not check, and an absent one is an empty directory.
+    - name: debugfs
+      hostPath:
+        path: /sys/kernel/debug
+    - name: tracefs
+      hostPath:
+        path: /sys/kernel/tracing
+        type: Directory
+    - name: btf
+      hostPath:
+        path: /sys/kernel/btf
+        type: Directory
+    - name: cgroup
+      hostPath:
+        path: /sys/fs/cgroup
+        type: Directory
+    # Only for kernel module symbols and BTF of modules; a node may have none.
+    - name: modules
+      hostPath:
+        path: /lib/modules
+    {{- if .Values.programFile }}
+    - name: program
+      configMap:
+        name: {{ include "bpftrace-debug.fullname" . }}
+    {{- end }}
+  tolerations:
+    {{- toYaml .Values.tolerations | nindent 4 }}
