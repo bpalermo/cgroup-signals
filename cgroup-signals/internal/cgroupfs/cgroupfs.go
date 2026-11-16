@@ -144,6 +144,14 @@ func PodUID(name string) (string, bool) {
 // keys (sock_throttled, and any a later kernel adds) are ignored.
 var MemoryEventNames = []string{"low", "high", "max", "oom", "oom_kill", "oom_group_kill"}
 
+// MemoryStatNames are the memory.stat keys cgroup-signals exports: together
+// they are nearly all of memory.current. anon is process memory (heap, stacks,
+// anonymous mmap, swap-backed tmpfs is not here but in file: shmem is a part
+// of file); file is the page cache, shmem included; kernel is kernel memory
+// charged to the cgroup (slab, stacks, page tables, ...; Linux 5.18+, absent
+// before and then not exported).
+var MemoryStatNames = []string{"anon", "file", "kernel"}
+
 // ParseFlatKeyed parses a cgroup flat-keyed file such as memory.events: one
 // "<key> <unsigned value>" pair per line.
 func ParseFlatKeyed(data []byte) (map[string]uint64, error) {

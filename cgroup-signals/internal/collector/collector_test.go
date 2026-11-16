@@ -90,12 +90,20 @@ func (f *fixture) addCgroup(t *testing.T, p string) {
 		t.Fatal(err)
 	}
 	f.writeEvents(t, p, "low 0\nhigh 5\nmax 2\noom 1\noom_kill 1\noom_group_kill 0\nsock_throttled 9\n")
+	f.writeStat(t, p, "anon 1000\nfile 2000\nkernel 300\nkernel_stack 50\nshmem 7\nfile_mapped 11\n")
 	f.peaks[filepath.Join(dir, "memory.peak")] = &peaktest.File{}
 }
 
 func (f *fixture) writeEvents(t *testing.T, p, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(f.root, p, "memory.events"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *fixture) writeStat(t *testing.T, p, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.root, p, "memory.stat"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -249,6 +257,39 @@ func TestMemoryEvents(t *testing.T) {
 
 	f.writeEvents(t, podPath, "garbage\n")
 	expect(t, f.scrape(t), map[string]float64{`cgroup_signals_scan_errors_total{op="memory_events"}`: 1})
+}
+
+func TestMemoryStat(t *testing.T) {
+	f := newFixture(t)
+	f.c.Rescan()
+	got := f.scrape(t)
+	for typ, v := range map[string]float64{"anon": 1000, "file": 2000, "kernel": 300} {
+		expect(t, got, map[string]float64{
+			`cgroup_signals_memory_stat_bytes{` + podSel + `,type="` + typ + `"}`: v,
+			`cgroup_signals_memory_stat_bytes{` + svcSel + `,type="` + typ + `"}`: v,
+		})
+	}
+	for _, typ := range []string{"kernel_stack", "shmem", "file_mapped"} {
+		absent(t, got, `cgroup_signals_memory_stat_bytes{`+podSel+`,type="`+typ+`"}`)
+	}
+
+	// A kernel before 5.18 has no "kernel" key: the others are still exported.
+	f.writeStat(t, podPath, "anon 5\nfile 6\n")
+	got = f.scrape(t)
+	expect(t, got, map[string]float64{`cgroup_signals_memory_stat_bytes{` + podSel + `,type="anon"}`: 5})
+	absent(t, got, `cgroup_signals_memory_stat_bytes{`+podSel+`,type="kernel"}`)
+
+	// A parse error is counted, and the peak is still read and reset.
+	f.writeStat(t, podPath, "garbage\n")
+	f.peak(podPath).Charge(42)
+	f.peak(podPath).Charge(10)
+	got = f.scrape(t)
+	expect(t, got, map[string]float64{
+		`cgroup_signals_scan_errors_total{op="memory_stat"}`: 1,
+		"cgroup_signals_memory_peak_bytes{" + podSel + "}":   42,
+	})
+	// Reset: the next window starts from the current usage.
+	expect(t, f.scrape(t), map[string]float64{"cgroup_signals_memory_peak_bytes{" + podSel + "}": 10})
 }
 
 func TestRemovedCgroupIsDropped(t *testing.T) {

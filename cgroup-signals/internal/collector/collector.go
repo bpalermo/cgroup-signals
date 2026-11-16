@@ -1,6 +1,7 @@
 // Package collector tracks the pod and node-service cgroups and exports their
-// signals: the memory peak since the previous scrape, memory.events, and the
-// PSI trigger events.
+// signals: the memory peak since the previous scrape, the memory.stat
+// composition at the end of that window, memory.events, and the PSI trigger
+// events.
 //
 // The memory peak is read and reset in Collect, not in a background loop, so
 // its window is exactly the time between two scrapes.
@@ -39,10 +40,11 @@ const (
 	OpPeakRead     = "peak_read"
 	OpPeakReset    = "peak_reset"
 	OpMemoryEvents = "memory_events"
+	OpMemoryStat   = "memory_stat"
 	OpPSIArm       = "psi_arm"
 )
 
-var ops = []string{OpDiscover, OpLimit, OpPeakOpen, OpPeakRead, OpPeakReset, OpMemoryEvents, OpPSIArm}
+var ops = []string{OpDiscover, OpLimit, OpPeakOpen, OpPeakRead, OpPeakReset, OpMemoryEvents, OpMemoryStat, OpPSIArm}
 
 var (
 	peakDesc = prometheus.NewDesc(namespace+"_memory_peak_bytes",
@@ -50,6 +52,12 @@ var (
 			"through this exporter's own file descriptor at each scrape. One collector owns the reset: two scrapers "+
 			"(or anything else resetting memory.peak) split the window between them.",
 		cgroupLabels, nil)
+	statDesc = prometheus.NewDesc(namespace+"_memory_stat_bytes",
+		"memory.stat of the cgroup and its descendants by type (anon, file, kernel), read at each scrape between "+
+			"reading memory.peak and resetting it: the composition at the end of the peak's window. The kernel keeps "+
+			"no peak per type, so the anonymous part of a peak is at most memory_peak_bytes minus the file and kernel "+
+			"memory still charged at that moment (an estimate: cache reclaimed during a spike makes it high).",
+		append([]string{"type"}, cgroupLabels...), nil)
 	eventsDesc = prometheus.NewDesc(namespace+"_memory_events_total",
 		"memory.events counters of the cgroup. Cumulative since the cgroup was created, and hierarchical: they include "+
 			"the events of descendant cgroups.",
@@ -300,6 +308,7 @@ func (c *Collector) Close() {
 // Describe implements prometheus.Collector.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- peakDesc
+	ch <- statDesc
 	ch <- eventsDesc
 	ch <- trackedDesc
 	ch <- triggerFDsDesc
@@ -308,7 +317,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // Collect implements prometheus.Collector. It reads and resets each tracked
-// cgroup's memory.peak and reads its memory.events.
+// cgroup's memory.peak and reads its memory.stat and memory.events.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -330,15 +339,40 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 // collectPeak returns false if the cgroup was dropped.
 func (c *Collector) collectPeak(ch chan<- prometheus.Metric, p string, e *entry) bool {
 	if e.peak == nil {
-		return true
+		return c.collectStat(ch, p, e)
 	}
 	v, err := e.peak.Read()
 	if err != nil {
 		return c.failed(p, OpPeakRead, err)
 	}
 	ch <- prometheus.MustNewConstMetric(peakDesc, prometheus.GaugeValue, float64(v), labelValues(e.cg)...)
+	// memory.stat after the peak and before its reset, so the two describe the
+	// same moment: the end of the window.
+	if !c.collectStat(ch, p, e) {
+		return false
+	}
 	if err := e.peak.Reset(); err != nil {
 		return c.failed(p, OpPeakReset, err)
+	}
+	return true
+}
+
+// collectStat returns false if the cgroup was dropped.
+func (c *Collector) collectStat(ch chan<- prometheus.Metric, p string, e *entry) bool {
+	data, err := fs.ReadFile(c.fsys, path.Join(p, "memory.stat"))
+	if err != nil {
+		return c.failed(p, OpMemoryStat, err)
+	}
+	values, err := cgroupfs.ParseFlatKeyed(data)
+	if err != nil {
+		c.scanError(OpMemoryStat, p, err)
+		return true
+	}
+	lv := labelValues(e.cg)
+	for _, name := range cgroupfs.MemoryStatNames {
+		if v, ok := values[name]; ok {
+			ch <- prometheus.MustNewConstMetric(statDesc, prometheus.GaugeValue, float64(v), append([]string{name}, lv...)...)
+		}
 	}
 	return true
 }
