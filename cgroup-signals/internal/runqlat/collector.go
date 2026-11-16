@@ -39,7 +39,7 @@ var (
 	latencyDesc = prometheus.NewDesc(namespace+"_runqueue_latency_seconds",
 		"Run-queue latency: the time from a task of the cgroup (or any cgroup under it) becoming runnable, or being "+
 			"preempted while runnable, to it getting on a CPU. A native histogram of schema 0 (bucket bounds are powers of two "+
-			"seconds, from 2^-19 s, about 1.9 us, up; everything from 8 s is in the (8, 16] bucket). "+
+			"seconds, from 2^-19 s, about 1.9 us; delays up to that are in its bucket, those over 2048 s in (2048, 4096]). "+
 			"cgroup=\"other\" is everything under no pod or node-service cgroup. Cumulative since the cgroup was first tracked.",
 		cgroupLabels, nil)
 	trackedDesc = prometheus.NewDesc(namespace+"_runqueue_tracked_cgroups",
@@ -305,14 +305,16 @@ func (c *Collector) collectHist(ch chan<- prometheus.Metric, idx uint32, since t
 const Schema = 0
 
 // SlotBucketOffset maps a slot to its native bucket: slot k, delays of
-// [2^(k-20), 2^(k-19)) s, is bucket k-SlotBucketOffset, which schema 0 defines
-// as (2^(k-20), 2^(k-19)] s. The open and closed ends differ only for a delay
-// of exactly a power of two seconds.
+// (2^(k-20), 2^(k-19)] s, is bucket k-SlotBucketOffset, which schema 0 defines
+// the same way.
 const SlotBucketOffset = 19
 
 // NativeBuckets returns the histogram's non-empty slots as native histogram
-// buckets of schema 0, by bucket index. Slot 0 (under 2^-19 s) is bucket -19,
-// not the zero bucket; the last slot (8 s and up) is bucket 4, (8, 16] s.
+// buckets of schema 0, by bucket index. Slot 0 (up to 2^-19 s, about 1.9 us)
+// is bucket -19, not the zero bucket: Prometheus's OTLP ingestion drops a zero
+// threshold (it sets 1e-128), which would make those delays zero, and on a
+// Raspberry Pi none are that short. The last slot (over 2048 s) is bucket 12,
+// (2048, 4096] s.
 func (h *Hist) NativeBuckets() map[int]int64 {
 	buckets := make(map[int]int64)
 	for k, n := range h.Slots {

@@ -177,9 +177,11 @@ never gets `CAP_BPF`. Run it as its own DaemonSet (the chart's
 
 The histogram is a Prometheus **native histogram** of schema 0: one series per
 cgroup, with buckets at powers of two seconds, (2^-20, 2^-19] s (about 1-1.9
-us) and up. The program's log2 slots are those buckets exactly: it counts in
-units of 2^-20 s, not microseconds. Delays under 2^-19 s are in bucket -19, not
-the zero bucket; everything from 8 s is in the (8, 16] s bucket. `_sum` is
+us) to (2048, 4096] s. The program's log2 slots are those buckets exactly,
+upper bound included: it counts in units of 2^-20 s, not microseconds. Delays
+up to 2^-19 s are in bucket -19, not the zero bucket (Prometheus's OTLP
+ingestion drops the zero threshold, which would make them zero); everything
+over 2048 s is in the last bucket. `_sum` is
 exact. There are no classic `_bucket` series: the scraper must ask for the
 protobuf format (Prometheus: `scrape_native_histograms: true`; an OpenTelemetry
 Collector's prometheus receiver: the same key, which yields an exponential

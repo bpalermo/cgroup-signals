@@ -158,7 +158,7 @@ func keys(m map[string]*dto.Metric) []string {
 func TestNativeBuckets(t *testing.T) {
 	h := Hist{Slots: [MaxSlots]uint64{0: 1, 1: 2, 19: 3, MaxSlots - 1: 7}}
 	got := h.NativeBuckets()
-	want := map[int]int64{-19: 1, -18: 2, 0: 3, 4: 7}
+	want := map[int]int64{-19: 1, -18: 2, 0: 3, 12: 7}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("NativeBuckets() = %v, want %v", got, want)
 	}
@@ -167,23 +167,24 @@ func TestNativeBuckets(t *testing.T) {
 	}
 }
 
-// slotByDefinition is slot k for 2^k <= ns * 2^20 / 1e9 < 2^(k+1), in exact
-// integer arithmetic.
+// slotByDefinition is the k with 2^k < ns * 2^20 / 1e9 <= 2^(k+1) (0 up to 2
+// units, MaxSlots-1 beyond), in exact integer arithmetic.
 func slotByDefinition(ns uint64) int {
 	u := new(big.Int).Lsh(new(big.Int).SetUint64(ns), 20)
-	u.Quo(u, big.NewInt(1e9))
-	k := u.BitLen() - 1
-	if k < 1 {
-		return 0
+	for k := range MaxSlots - 1 {
+		bound := new(big.Int).Lsh(big.NewInt(1e9), uint(k+1))
+		if u.Cmp(bound) <= 0 {
+			return k
+		}
 	}
-	return min(k, MaxSlots-1)
+	return MaxSlots - 1
 }
 
 func TestSlotOf(t *testing.T) {
 	var ns []uint64
 	for k := range MaxSlots + 2 {
-		// Around every slot edge: ceil(1953125 * 2^k / 2048).
-		edge := (uint64(1953125)<<k + 2047) >> 11
+		// Around every slot edge: floor(1953125 * 2^k / 2048).
+		edge := (uint64(1953125) << k) >> 11
 		for d := uint64(0); d < 3; d++ {
 			ns = append(ns, edge-d, edge+d)
 		}
@@ -201,9 +202,15 @@ func TestSlotOf(t *testing.T) {
 		}
 	}
 	// Slot k is native bucket k-19, (2^(k-20), 2^(k-19)] s: 1 ms is in
-	// (2^-10, 2^-9] s, bucket -9, slot 10.
-	if got := slotOf(1e6) - SlotBucketOffset; got != -9 {
-		t.Errorf("1 ms is in bucket %d, want -9", got)
+	// (2^-10, 2^-9] s, bucket -9; exactly 1 s is in (0.5, 1], bucket 0, and
+	// 2048 s in bucket 11, the last before the catch-all.
+	for _, c := range []struct {
+		ns   uint64
+		want int
+	}{{1e6, -9}, {1e9, 0}, {1e9 + 1, 1}, {2048e9, 11}, {2048e9 + 1, 12}} {
+		if got := slotOf(c.ns) - SlotBucketOffset; got != c.want {
+			t.Errorf("%d ns is in bucket %d, want %d", c.ns, got, c.want)
+		}
 	}
 }
 
