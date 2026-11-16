@@ -5,8 +5,9 @@
 #ifndef CGROUP_SIGNALS_RUNQLAT_H
 #define CGROUP_SIGNALS_RUNQLAT_H
 
-/* Slot k holds the delays of [2^k, 2^(k+1)) microseconds (slot 0: under 2 us);
- * the last slot is everything from 2^(MAX_SLOTS-1) us (about 8.4 s) up. */
+/* Slot k holds the delays of [2^k, 2^(k+1)) units of 2^-20 s (about 0.954 us;
+ * slot 0: under 2 units), the last slot everything from 2^(MAX_SLOTS-1) units
+ * (8 s) up: slot k is bucket k-19 of a native histogram of schema 0. */
 #define MAX_SLOTS 24
 
 /* Tracked cgroups, "other" included: the size of the histogram array. The

@@ -38,7 +38,8 @@ var (
 
 	latencyDesc = prometheus.NewDesc(namespace+"_runqueue_latency_seconds",
 		"Run-queue latency: the time from a task of the cgroup (or any cgroup under it) becoming runnable, or being "+
-			"preempted while runnable, to it getting on a CPU. Buckets are powers of two microseconds, 2 us to about 8.4 s. "+
+			"preempted while runnable, to it getting on a CPU. A native histogram of schema 0 (bucket bounds are powers of two "+
+			"seconds, from 2^-19 s, about 1.9 us, up; everything from 8 s is in the (8, 16] bucket). "+
 			"cgroup=\"other\" is everything under no pod or node-service cgroup. Cumulative since the cgroup was first tracked.",
 		cgroupLabels, nil)
 	trackedDesc = prometheus.NewDesc(namespace+"_runqueue_tracked_cgroups",
@@ -68,9 +69,10 @@ type Config struct {
 }
 
 type entry struct {
-	cg  cgroupfs.Cgroup
-	id  uint64
-	idx uint32
+	cg    cgroupfs.Cgroup
+	id    uint64
+	idx   uint32
+	since time.Time // when its histogram was zeroed: the series' created timestamp
 }
 
 // Collector is a prometheus.Collector over the program's histograms. It owns
@@ -90,6 +92,9 @@ type Collector struct {
 	// they cannot land in a new cgroup's histogram.
 	quarantine []uint32
 	next       uint32 // the next never-used index
+	// start is when the program began counting, the created timestamp of
+	// cgroup="other".
+	start time.Time
 }
 
 // New returns a Collector that tracks nothing until Rescan.
@@ -99,6 +104,7 @@ func New(cfg Config) *Collector {
 		log:     cfg.Log,
 		tracked: make(map[string]*entry),
 		next:    1, // 0 is other
+		start:   time.Now(),
 		scanErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "runqueue_scan_errors_total",
@@ -217,7 +223,7 @@ func (c *Collector) track(cg cgroupfs.Cgroup, id uint64) {
 		c.scanError(OpMap, cg.Path, err)
 		return
 	}
-	c.tracked[cg.Path] = &entry{cg: cg, id: id, idx: idx}
+	c.tracked[cg.Path] = &entry{cg: cg, id: id, idx: idx, since: time.Now()}
 	c.log.Debug("tracking cgroup", "path", cg.Path, "id", id, "index", idx)
 }
 
@@ -269,9 +275,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	sort.Strings(paths)
 	for _, p := range paths {
 		e := c.tracked[p]
-		c.collectHist(ch, e.idx, labelValues(e.cg))
+		c.collectHist(ch, e.idx, e.since, labelValues(e.cg))
 	}
-	c.collectHist(ch, Other, []string{"", "", OtherCgroup})
+	c.collectHist(ch, Other, c.start, []string{"", "", OtherCgroup})
 	ch <- prometheus.MustNewConstMetric(trackedDesc, prometheus.GaugeValue, float64(len(c.tracked)))
 	if c.cfg.Missed != nil {
 		if n, err := c.cfg.Missed(); err != nil {
@@ -283,27 +289,38 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.scanErrors.Collect(ch)
 }
 
-func (c *Collector) collectHist(ch chan<- prometheus.Metric, idx uint32, lv []string) {
+func (c *Collector) collectHist(ch chan<- prometheus.Metric, idx uint32, since time.Time, lv []string) {
 	h, err := c.cfg.Store.Hist(idx)
 	if err != nil {
 		c.scanError(OpRead, fmt.Sprint(lv), err)
 		return
 	}
-	count, buckets := h.Buckets()
-	ch <- prometheus.MustNewConstHistogram(latencyDesc, count, float64(h.SumNS)/1e9, buckets, lv...)
+	buckets := h.NativeBuckets()
+	ch <- prometheus.MustNewConstNativeHistogram(latencyDesc, h.Count(), float64(h.SumNS)/1e9,
+		buckets, nil, 0, Schema, 0, since, lv...)
 }
 
-// Buckets returns the histogram's count and its cumulative buckets by upper
-// bound in seconds, as a Prometheus histogram: the last slot is only in the
-// count, which is the +Inf bucket.
-func (h *Hist) Buckets() (uint64, map[float64]uint64) {
-	buckets := make(map[float64]uint64, MaxSlots-1)
-	var cum uint64
-	for k := 0; k < MaxSlots-1; k++ {
-		cum += h.Slots[k]
-		buckets[Upper(k)] = cum
+// Schema is the native histogram schema of the latency histograms: 0, bucket
+// bounds at powers of two seconds.
+const Schema = 0
+
+// SlotBucketOffset maps a slot to its native bucket: slot k, delays of
+// [2^(k-20), 2^(k-19)) s, is bucket k-SlotBucketOffset, which schema 0 defines
+// as (2^(k-20), 2^(k-19)] s. The open and closed ends differ only for a delay
+// of exactly a power of two seconds.
+const SlotBucketOffset = 19
+
+// NativeBuckets returns the histogram's non-empty slots as native histogram
+// buckets of schema 0, by bucket index. Slot 0 (under 2^-19 s) is bucket -19,
+// not the zero bucket; the last slot (8 s and up) is bucket 4, (8, 16] s.
+func (h *Hist) NativeBuckets() map[int]int64 {
+	buckets := make(map[int]int64)
+	for k, n := range h.Slots {
+		if n > 0 {
+			buckets[k-SlotBucketOffset] = int64(n)
+		}
 	}
-	return cum + h.Slots[MaxSlots-1], buckets
+	return buckets
 }
 
 func labelValues(cg cgroupfs.Cgroup) []string {

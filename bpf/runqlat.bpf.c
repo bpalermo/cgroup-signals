@@ -236,31 +236,37 @@ static __always_inline __u32 log2u32(__u32 v)
 	return r;
 }
 
-/* The slot of a delay of 4.3 seconds or more: the division the fast path
- * avoids, out of line. */
-static __noinline __u32 slot_slow(__u64 ns)
-{
-	__u64 us = ns / 1000;
-	__u32 r;
+/* The slot of a delay: slot k holds delays of [2^k, 2^(k+1)) units of 2^-20 s
+ * (about 0.954 us), slot 0 everything under 2 units, the last slot everything
+ * from 2^(MAX_SLOTS-1) units (8 s) up. The unit makes slot k exactly bucket
+ * k-19 of a Prometheus native histogram of schema 0 (powers of two seconds).
+ *
+ * A unit is 1e9/2^20 = 1953125/2048 ns, so the first delay of slot k is
+ * ceil(1953125 * 2^k / 2048) ns. For ns in [2^j, 2^(j+1)) the slot is j-10 or
+ * j-9 (1953125/2048 is 2^9.897), so one floor(log2) and one compare give it,
+ * with no division. Mirrored by slotOf in cgroup-signals/internal/runqlat. */
+#define SLOT1_NS 1908 /* ceil(1953125 * 2 / 2048): the first delay of slot 1 */
 
-	if (us >> 32)
+static __always_inline __u32 slot_of(__u64 ns)
+{
+	__u32 j, k;
+
+	if (ns < SLOT1_NS)
+		return 0;
+	j = (ns >> 32) ? 32 + log2u32((__u32)(ns >> 32)) : log2u32((__u32)ns);
+	k = j - 10; /* ns >= 1908 > 2^10, so j >= 10 */
+	if (k >= MAX_SLOTS - 1)
 		return MAX_SLOTS - 1;
-	r = log2u32((__u32)us);
-	return r < MAX_SLOTS ? r : MAX_SLOTS - 1;
+	if (ns >= ((1953125ULL << (k + 1)) + 2047) >> 11)
+		k++;
+	return k;
 }
 
 static __always_inline void record(__u32 idx, __u64 delta_ns)
 {
-	__u32 slot;
+	__u32 slot = slot_of(delta_ns);
 	struct hist *h;
 
-	/* ns / 1000 for a 32-bit ns is x * 274877907 >> 38, exact (BPF has no
-	 * 64-bit multiply-high, so clang would leave a real division). The
-	 * result is under 2^23, so the slot is under 23. */
-	if (delta_ns >> 32)
-		slot = slot_slow(delta_ns);
-	else
-		slot = log2u32((__u32)((delta_ns * 274877907ULL) >> 38));
 	h = bpf_map_lookup_elem(&hists, &idx);
 	if (!h)
 		return;

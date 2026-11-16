@@ -100,7 +100,7 @@ exports the Prometheus histogram.
 How it works, because the C and the Go depend on each other:
 
 - The program counts into `hists[idx]`, a per-CPU array of `struct hist`
-  (`MAX_SLOTS` log2 slots in microseconds, plus the sum in ns). `idx` comes from
+  (`MAX_SLOTS` log2 slots in units of 2^-20 s, which are native schema-0 buckets, plus the sum in ns). `idx` comes from
   the `tracked` map (cgroup id to index), which the loader fills from the
   cgroups it discovers; a task's cgroup is looked up, then its ancestors' up to
   `MAX_DEPTH`, and what is under none counts in index 0 ("other"). A
