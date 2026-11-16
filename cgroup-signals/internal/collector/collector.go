@@ -55,8 +55,9 @@ var (
 	statDesc = prometheus.NewDesc(namespace+"_memory_stat_bytes",
 		"memory.stat of the cgroup and its descendants by type (anon, file, kernel), read at each scrape between "+
 			"reading memory.peak and resetting it: the composition at the end of the peak's window. The kernel keeps "+
-			"no peak per type, so the anonymous part of a peak is at most memory_peak_bytes minus the file and kernel "+
-			"memory still charged at that moment (an estimate: cache reclaimed during a spike makes it high).",
+			"no peak per type: memory_peak_bytes minus the file and kernel memory charged at that moment estimates the "+
+			"anonymous part of the peak, but it is not a bound. File or kernel memory that shrank after the peak (cache "+
+			"reclaimed by the spike) makes it too high; file memory that grew after it makes it too low.",
 		append([]string{"type"}, cgroupLabels...), nil)
 	eventsDesc = prometheus.NewDesc(namespace+"_memory_events_total",
 		"memory.events counters of the cgroup. Cumulative since the cgroup was created, and hierarchical: they include "+

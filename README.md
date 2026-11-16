@@ -276,11 +276,14 @@ Peak since the last scrape against the pod's memory limit:
 ```
 
 How much of the peak was process memory, not page cache. The kernel keeps no
-peak per type, so this is an estimate: memory.stat is read in the same scrape,
-between reading memory.peak and resetting it, and the file and kernel memory
-still charged then are taken off the peak. It reads high when a spike made the
-kernel reclaim cache (the cache was larger at the peak than at the scrape), and
-`anon` itself is a floor:
+peak per type, so this is an estimate, not a bound: memory.stat is read in the
+same scrape, between reading memory.peak and resetting it, and the file and
+kernel memory charged then are taken off the peak. It is wrong in either
+direction when the mix changed after the peak: too high when the spike made the
+kernel reclaim cache (more cache at the peak than at the scrape), too low when
+cache grew after the peak (a process that freed 80 MB of heap and then read an
+80 MB file shows almost no anonymous peak). It is closest when the window is
+short and the file memory steady:
 
 ```promql
 # estimated anonymous peak since the last scrape
