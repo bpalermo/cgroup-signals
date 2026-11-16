@@ -63,11 +63,12 @@ cgroup_signals_memory_peak_bytes
 | Metric | Type | Labels | |
 | --- | --- | --- | --- |
 | `cgroup_signals_memory_peak_bytes` | gauge | `pod_uid`, `qos`, `cgroup` | peak memory usage of the cgroup and its descendants since the previous scrape |
+| `cgroup_signals_memory_stat_bytes` | gauge | `type`, `pod_uid`, `qos`, `cgroup` | `memory.stat` at the end of the peak's window: `type` is `anon`, `file` (page cache, shmem included) or `kernel` (Linux 5.18+) |
 | `cgroup_signals_memory_events_total` | counter | `event`, `pod_uid`, `qos`, `cgroup` | `memory.events`: `event` is `low`, `high`, `max`, `oom`, `oom_kill` or `oom_group_kill` |
 | `cgroup_signals_psi_trigger_events_total` | counter | `resource`, `pod_uid`, `qos`, `cgroup` | PSI trigger events; `resource` is `cpu` or `memory` |
 | `cgroup_signals_tracked_cgroups` | gauge | | cgroups being tracked |
 | `cgroup_signals_psi_trigger_fds` | gauge | | open PSI trigger file descriptors (two per tracked cgroup) |
-| `cgroup_signals_scan_errors_total` | counter | `op` | errors by operation: `discover`, `limit`, `peak_open`, `peak_read`, `peak_reset`, `memory_events`, `psi_arm` |
+| `cgroup_signals_scan_errors_total` | counter | `op` | errors by operation: `discover`, `limit`, `peak_open`, `peak_read`, `peak_reset`, `memory_events`, `memory_stat`, `psi_arm` |
 
 Plus the Go runtime, process and build-info collectors.
 
@@ -272,6 +273,26 @@ Peak since the last scrape against the pod's memory limit:
 )
 / on (namespace, pod) group_left
   sum by (namespace, pod) (kube_pod_container_resource_limits{resource="memory", unit="byte"})
+```
+
+How much of the peak was process memory, not page cache. The kernel keeps no
+peak per type, so this is an estimate, not a bound: memory.stat is read in the
+same scrape, between reading memory.peak and resetting it, and the file and
+kernel memory charged then are taken off the peak. It is wrong in either
+direction when the mix changed after the peak: too high when the spike made the
+kernel reclaim cache (more cache at the peak than at the scrape), too low when
+cache grew after the peak (a process that freed 80 MB of heap and then read an
+80 MB file shows almost no anonymous peak). It is closest when the window is
+short and the file memory steady:
+
+```promql
+# estimated anonymous peak since the last scrape
+cgroup_signals_memory_peak_bytes
+  - ignoring (type) cgroup_signals_memory_stat_bytes{type="file"}
+  - ignoring (type) cgroup_signals_memory_stat_bytes{type="kernel"}
+
+# the burst above what is resident now: how much a 60 s working-set scrape misses
+cgroup_signals_memory_peak_bytes - ignoring (type) sum without (type) (cgroup_signals_memory_stat_bytes)
 ```
 
 Cgroups whose PSI triggers fired in the last 5 minutes:
