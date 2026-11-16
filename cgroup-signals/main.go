@@ -23,6 +23,7 @@ import (
 	"github.com/bpalermo/cgroup-signals/cgroup-signals/internal/cgroupfs"
 	"github.com/bpalermo/cgroup-signals/cgroup-signals/internal/collector"
 	"github.com/bpalermo/cgroup-signals/cgroup-signals/internal/psi"
+	"github.com/bpalermo/cgroup-signals/cgroup-signals/internal/runqlat"
 	"github.com/bpalermo/cgroup-signals/cgroup-signals/internal/server"
 	"github.com/bpalermo/cgroup-signals/common/version"
 )
@@ -42,6 +43,7 @@ type config struct {
 	maxTracked     int
 	trigger        psi.Trigger
 	runqueue       bool
+	bucketSlots    []int
 }
 
 // errVersion means --version was given and printed.
@@ -55,6 +57,9 @@ func parseFlags(args []string) (config, error) {
 		thresholdUS uint
 		windowUS    uint
 		showVersion bool
+		bucketMin   time.Duration
+		bucketMax   time.Duration
+		bucketStep  int
 	)
 	fs.StringVar(&cfg.listen, "listen", ":9102", "address of the /metrics and /healthz endpoint")
 	fs.StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn or error")
@@ -64,6 +69,9 @@ func parseFlags(args []string) (config, error) {
 	fs.UintVar(&thresholdUS, "psi-threshold-us", 100000, "PSI trigger: stall time within the window, in microseconds, that raises an event")
 	fs.UintVar(&windowUS, "psi-window-us", 1000000, "PSI trigger: window in microseconds; a multiple of 2 s unless the process has CAP_SYS_RESOURCE")
 	fs.BoolVar(&cfg.runqueue, "runqueue", false, "run the run-queue latency exporter (eBPF; needs CAP_BPF and CAP_PERFMON) instead of the memory and PSI exporter; the PSI flags are then ignored")
+	fs.DurationVar(&bucketMin, "runqueue-bucket-min", 16*time.Microsecond, "with --runqueue: the smallest latency bucket bound, a power of two microseconds from 2us")
+	fs.DurationVar(&bucketMax, "runqueue-bucket-max", 262144*time.Microsecond, "with --runqueue: the largest finite latency bucket bound, a power of two microseconds up to 8.388608s; above it only +Inf")
+	fs.IntVar(&bucketStep, "runqueue-bucket-factor", 4, "with --runqueue: the ratio between neighbouring bucket bounds, a power of two (2 exports every bound the program counts)")
 	fs.BoolVar(&showVersion, "version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
@@ -83,6 +91,11 @@ func parseFlags(args []string) (config, error) {
 	}
 	cfg.trigger = psi.Trigger{ThresholdUS: uint32(thresholdUS), WindowUS: uint32(windowUS)}
 	if cfg.runqueue {
+		slots, err := runqlat.BucketSlots(bucketMin, bucketMax, bucketStep)
+		if err != nil {
+			return cfg, fmt.Errorf("-runqueue-bucket-*: %w", err)
+		}
+		cfg.bucketSlots = slots
 		return cfg, nil
 	}
 	return cfg, validateTrigger(cfg.trigger)

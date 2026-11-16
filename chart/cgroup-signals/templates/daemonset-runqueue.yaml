@@ -52,6 +52,9 @@ spec:
             - --cgroup-root=/host/sys/fs/cgroup
             - --rescan-interval={{ .Values.runqueue.rescanInterval }}
             - --max-tracked-cgroups={{ .Values.runqueue.maxTrackedCgroups | int64 }}
+            - --runqueue-bucket-min={{ .Values.runqueue.buckets.min }}
+            - --runqueue-bucket-max={{ .Values.runqueue.buckets.max }}
+            - --runqueue-bucket-factor={{ .Values.runqueue.buckets.factor | int64 }}
             - --log-level={{ .Values.runqueue.logLevel }}
             {{- range .Values.runqueue.extraArgs }}
             - {{ . | quote }}

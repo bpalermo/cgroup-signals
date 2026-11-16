@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -156,7 +157,7 @@ func keys(m map[string]*dto.Metric) []string {
 
 func TestBucketsAreCumulativeAndInfIsTheCount(t *testing.T) {
 	h := Hist{Slots: [MaxSlots]uint64{0: 1, 1: 2, 4: 3, MaxSlots - 2: 5, MaxSlots - 1: 7}}
-	count, buckets := h.Buckets()
+	count, buckets := h.Buckets(nil)
 	if count != 18 {
 		t.Errorf("count = %d, want 18", count)
 	}
@@ -190,6 +191,67 @@ func TestBucketsAreCumulativeAndInfIsTheCount(t *testing.T) {
 			t.Errorf("bucket %d (%g) = %d is below the previous %d", k, Upper(k), v, prev)
 		} else {
 			prev = v
+		}
+	}
+}
+
+func TestBucketsSubset(t *testing.T) {
+	h := Hist{Slots: [MaxSlots]uint64{0: 1, 1: 2, 4: 3, 5: 4, MaxSlots - 1: 7}}
+	slots, err := BucketSlots(4*time.Microsecond, 64*time.Microsecond, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, buckets := h.Buckets(slots)
+	if count != 17 {
+		t.Errorf("count = %d, want 17", count)
+	}
+	want := map[float64]uint64{4e-6: 3, 16e-6: 3, 64e-6: 10}
+	if len(buckets) != len(want) {
+		t.Fatalf("buckets %v, want %v", buckets, want)
+	}
+	for le, w := range want {
+		if buckets[le] != w {
+			t.Errorf("le=%g: %d, want %d", le, buckets[le], w)
+		}
+	}
+}
+
+func TestBucketSlots(t *testing.T) {
+	us := time.Microsecond
+	for _, c := range []struct {
+		min, max time.Duration
+		factor   int
+		want     []int
+	}{
+		{MinBucket, MaxBucket, 2, allSlots},
+		{16 * us, 262144 * us, 4, []int{3, 5, 7, 9, 11, 13, 15, 17}},
+		{1024 * us, 1024 * us, 8, []int{9}},
+		{2 * us, 8 * us, 2, []int{0, 1, 2}},
+	} {
+		got, err := BucketSlots(c.min, c.max, c.factor)
+		if err != nil {
+			t.Errorf("BucketSlots(%s, %s, %d): %v", c.min, c.max, c.factor, err)
+			continue
+		}
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("BucketSlots(%s, %s, %d) = %v, want %v", c.min, c.max, c.factor, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		min, max time.Duration
+		factor   int
+	}{
+		{us, 16 * us, 2},           // below 2 us
+		{2 * us, 2 * MaxBucket, 2}, // above the last finite slot
+		{3 * us, 12 * us, 2},       // not powers of two
+		{16 * us, 8 * us, 2},       // max below min
+		{16 * us, 128 * us, 4},     // 8x is not a power of 4
+		{16 * us, 64 * us, 3},      // factor not a power of two
+		{16 * us, 64 * us, 1},      // factor 1
+		{16*us + 1, 64 * us, 2},    // not whole microseconds
+	} {
+		if _, err := BucketSlots(c.min, c.max, c.factor); err == nil {
+			t.Errorf("BucketSlots(%s, %s, %d) succeeded", c.min, c.max, c.factor)
 		}
 	}
 }

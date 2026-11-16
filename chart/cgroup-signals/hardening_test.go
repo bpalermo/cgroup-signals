@@ -274,6 +274,9 @@ func TestRunqueue(t *testing.T) {
 		"--cgroup-root=/host/sys/fs/cgroup",
 		"--rescan-interval=15s",
 		"--max-tracked-cgroups=512",
+		"--runqueue-bucket-min=16us",
+		"--runqueue-bucket-max=262.144ms",
+		"--runqueue-bucket-factor=4",
 		"--log-level=info",
 	}
 	check(slices.Equal(args(t, c), want), fmt.Sprintf("args are %v, want %v", args(t, c), want))
@@ -305,7 +308,10 @@ func TestRunqueueOptions(t *testing.T) {
 	}
 	c := container(t, ds)
 	got := args(t, c)
-	for _, w := range []string{"--listen=:9200", "--max-tracked-cgroups=64", "--rescan-interval=30s"} {
+	for _, w := range []string{
+		"--listen=:9200", "--max-tracked-cgroups=64", "--rescan-interval=30s",
+		"--runqueue-bucket-min=2us", "--runqueue-bucket-max=8.388608s", "--runqueue-bucket-factor=2",
+	} {
 		if !slices.Contains(got, w) {
 			t.Errorf("args %v lack %s", got, w)
 		}

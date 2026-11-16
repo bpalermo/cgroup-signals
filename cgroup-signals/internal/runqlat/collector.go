@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math/bits"
 	"sort"
 	"sync"
 	"time"
@@ -38,7 +39,8 @@ var (
 
 	latencyDesc = prometheus.NewDesc(namespace+"_runqueue_latency_seconds",
 		"Run-queue latency: the time from a task of the cgroup (or any cgroup under it) becoming runnable, or being "+
-			"preempted while runnable, to it getting on a CPU. Buckets are powers of two microseconds, 2 us to about 8.4 s. "+
+			"preempted while runnable, to it getting on a CPU. Bucket bounds are powers of two microseconds (the "+
+			"--runqueue-bucket-* flags pick which). "+
 			"cgroup=\"other\" is everything under no pod or node-service cgroup. Cumulative since the cgroup was first tracked.",
 		cgroupLabels, nil)
 	trackedDesc = prometheus.NewDesc(namespace+"_runqueue_tracked_cgroups",
@@ -64,7 +66,10 @@ type Config struct {
 	Inode Inode
 	// MaxTracked caps the tracked cgroups; it must be below MaxCgroups.
 	MaxTracked int
-	Log        *slog.Logger
+	// Slots are the slots whose upper bounds are the exported buckets, in
+	// increasing order (see BucketSlots); nil exports every slot.
+	Slots []int
+	Log   *slog.Logger
 }
 
 type entry struct {
@@ -289,21 +294,90 @@ func (c *Collector) collectHist(ch chan<- prometheus.Metric, idx uint32, lv []st
 		c.scanError(OpRead, fmt.Sprint(lv), err)
 		return
 	}
-	count, buckets := h.Buckets()
+	count, buckets := h.Buckets(c.cfg.Slots)
 	ch <- prometheus.MustNewConstHistogram(latencyDesc, count, float64(h.SumNS)/1e9, buckets, lv...)
 }
 
 // Buckets returns the histogram's count and its cumulative buckets by upper
-// bound in seconds, as a Prometheus histogram: the last slot is only in the
-// count, which is the +Inf bucket.
-func (h *Hist) Buckets() (uint64, map[float64]uint64) {
-	buckets := make(map[float64]uint64, MaxSlots-1)
-	var cum uint64
-	for k := 0; k < MaxSlots-1; k++ {
-		cum += h.Slots[k]
-		buckets[Upper(k)] = cum
+// bound in seconds, as a Prometheus histogram, for the slots given (nil: all;
+// see BucketSlots). The last slot is only in the count, which is the +Inf
+// bucket. Leaving out a slot's bound merges it into the next exported bucket,
+// which a cumulative histogram allows.
+func (h *Hist) Buckets(slots []int) (uint64, map[float64]uint64) {
+	cum := make([]uint64, MaxSlots)
+	var n uint64
+	for k := range MaxSlots {
+		n += h.Slots[k]
+		cum[k] = n
 	}
-	return cum + h.Slots[MaxSlots-1], buckets
+	if slots == nil {
+		slots = allSlots
+	}
+	buckets := make(map[float64]uint64, len(slots))
+	for _, k := range slots {
+		if k >= 0 && k < MaxSlots-1 {
+			buckets[Upper(k)] = cum[k]
+		}
+	}
+	return n, buckets
+}
+
+var allSlots = func() []int {
+	s := make([]int, MaxSlots-1)
+	for k := range s {
+		s[k] = k
+	}
+	return s
+}()
+
+// MinBucket and MaxBucket are the smallest and largest finite bucket bounds the
+// program's slots can give: 2 us and 2^23 us (about 8.4 s).
+const (
+	MinBucket = 2 * time.Microsecond
+	MaxBucket = (1 << (MaxSlots - 1)) * time.Microsecond
+)
+
+// BucketSlots returns the slots whose upper bounds are min, min*factor,
+// min*factor^2, ... max: the buckets to export. min and max must be powers of
+// two microseconds within MinBucket..MaxBucket, factor a power of two, and max
+// a power of factor times min. Fewer buckets mean fewer series (one a bucket
+// and cgroup) and quantiles interpolated over a wider range.
+func BucketSlots(min, max time.Duration, factor int) ([]int, error) {
+	lo, ok := log2US(min)
+	if !ok {
+		return nil, fmt.Errorf("bucket minimum %s is not a power of two microseconds between %s and %s", min, MinBucket, MaxBucket)
+	}
+	hi, ok := log2US(max)
+	if !ok {
+		return nil, fmt.Errorf("bucket maximum %s is not a power of two microseconds between %s and %s", max, MinBucket, MaxBucket)
+	}
+	if hi < lo {
+		return nil, fmt.Errorf("bucket maximum %s is below the minimum %s", max, min)
+	}
+	step := bits.TrailingZeros(uint(factor))
+	if factor < 2 || factor&(factor-1) != 0 {
+		return nil, fmt.Errorf("bucket factor %d is not a power of two of at least 2", factor)
+	}
+	if (hi-lo)%step != 0 {
+		return nil, fmt.Errorf("bucket maximum %s is not %s times a power of %d", max, min, factor)
+	}
+	var slots []int
+	for j := lo; j <= hi; j += step {
+		slots = append(slots, j-1) // slot k's bound is 2^(k+1) us
+	}
+	return slots, nil
+}
+
+// log2US returns j for d = 2^j us with 1 <= j <= MaxSlots-1.
+func log2US(d time.Duration) (int, bool) {
+	if d < MinBucket || d > MaxBucket || d%time.Microsecond != 0 {
+		return 0, false
+	}
+	us := uint64(d / time.Microsecond)
+	if us&(us-1) != 0 {
+		return 0, false
+	}
+	return bits.TrailingZeros64(us), true
 }
 
 func labelValues(cg cgroupfs.Cgroup) []string {

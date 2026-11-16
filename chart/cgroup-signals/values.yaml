@@ -128,6 +128,17 @@ runqueue:
   # this the rest count in cgroup="other". At most 4095.
   maxTrackedCgroups: 512
 
+  # Latency bucket bounds: min, min*factor, ... max, then +Inf. min and max are
+  # powers of two microseconds (2us .. 8.388608s), factor a power of two, and
+  # every bound is one series per tracked cgroup. The defaults (16us, 64us,
+  # 256us ... 262.144ms: 8 bounds + +Inf) cover a Raspberry Pi node where 68 %
+  # of wakeups wait under 16us and none reach 131ms; min 2us, max 8.388608s,
+  # factor 2 exports all 23 bounds the program counts.
+  buckets:
+    min: 16us
+    max: 262.144ms
+    factor: 4
+
   logLevel: info
   extraArgs: []
 

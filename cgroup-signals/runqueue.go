@@ -49,6 +49,7 @@ func runRunqueue(cfg config, log *slog.Logger) error {
 		FS:         os.DirFS(cfg.cgroupRoot),
 		Inode:      func(p string) (uint64, error) { return cgroupfs.Inode(cfg.cgroupRoot, p) },
 		MaxTracked: limit,
+		Slots:      cfg.bucketSlots,
 		Log:        log,
 	})
 	col.Rescan()
