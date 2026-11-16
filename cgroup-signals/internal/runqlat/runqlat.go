@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"math"
+	"math/bits"
 	"os"
 	"strconv"
 	"strings"
@@ -30,9 +30,10 @@ import (
 
 const (
 	// MaxSlots is the number of slots of a histogram: slot k counts delays
-	// of [2^k, 2^(k+1)) microseconds, and the last slot everything above.
+	// of (2^k, 2^(k+1)] units of 2^-20 s (about 0.954 us), slot 0 everything
+	// up to 2 units and the last slot everything over 2^31 units (2048 s).
 	// Equal to MAX_SLOTS in bpf/runqlat.h.
-	MaxSlots = 24
+	MaxSlots = 32
 	// MaxCgroups is the most histograms the program can hold, "other"
 	// included. Equal to MAX_CGROUPS in bpf/runqlat.h.
 	MaxCgroups = 4096
@@ -71,13 +72,25 @@ func (h *Hist) add(o *Hist) {
 	h.SumNS += o.SumNS
 }
 
-// Upper returns the inclusive upper bound, in seconds, of slot k: delays in
-// slot k are under 2^(k+1) microseconds. The last slot has none: +Inf.
-func Upper(k int) float64 {
-	if k >= MaxSlots-1 {
-		return math.Inf(1)
+// slot0MaxNS is the last delay, in nanoseconds, of slot 0: floor(1953125*2/2048).
+const slot0MaxNS = 1907
+
+// slotOf is the slot the program puts a delay of ns nanoseconds in: slot_of in
+// bpf/runqlat.bpf.c, which it must match. A unit is 1e9/2^20 = 1953125/2048
+// ns, so slot k ends at floor(1953125 * 2^(k+1) / 2048) ns; for ns in
+// [2^j, 2^(j+1)) the slot is j-10 or j-9.
+func slotOf(ns uint64) int {
+	if ns <= slot0MaxNS {
+		return 0
 	}
-	return float64(uint64(1)<<(k+1)) / 1e6
+	k := bits.Len64(ns) - 1 - 10
+	if k >= MaxSlots-1 {
+		return MaxSlots - 1
+	}
+	if ns > (1953125<<(k+1))>>11 {
+		k++
+	}
+	return k
 }
 
 // Store is the program's maps, as the Collector uses them. *Program is one;

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
+	"math/big"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -154,57 +155,62 @@ func keys(m map[string]*dto.Metric) []string {
 	return out
 }
 
-func TestBucketsAreCumulativeAndInfIsTheCount(t *testing.T) {
-	h := Hist{Slots: [MaxSlots]uint64{0: 1, 1: 2, 4: 3, MaxSlots - 2: 5, MaxSlots - 1: 7}}
-	count, buckets := h.Buckets()
-	if count != 18 {
-		t.Errorf("count = %d, want 18", count)
+func TestNativeBuckets(t *testing.T) {
+	h := Hist{Slots: [MaxSlots]uint64{0: 1, 1: 2, 19: 3, MaxSlots - 1: 7}}
+	got := h.NativeBuckets()
+	want := map[int]int64{-19: 1, -18: 2, 0: 3, 12: 7}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("NativeBuckets() = %v, want %v", got, want)
 	}
-	if len(buckets) != MaxSlots-1 {
-		t.Fatalf("%d finite buckets, want %d", len(buckets), MaxSlots-1)
-	}
-	for _, c := range []struct {
-		le   float64
-		want uint64
-	}{
-		{2e-6, 1},          // slot 0: under 2 us
-		{4e-6, 3},          // + slot 1: [2, 4) us
-		{8e-6, 3},          // slot 2 empty
-		{32e-6, 6},         // + slot 4: [16, 32) us
-		{8388608e-6, 11},   // 2^23 us, the last finite bound: +5 in slot 22
-		{math.Inf(1), 999}, // not a finite bucket
-	} {
-		if c.le > 1e9 {
-			if _, ok := buckets[c.le]; ok {
-				t.Error("the +Inf bucket must not be in the map")
-			}
-			continue
-		}
-		if got := buckets[c.le]; got != c.want {
-			t.Errorf("le=%g: %d, want %d", c.le, got, c.want)
-		}
-	}
-	var prev uint64
-	for k := 0; k < MaxSlots-1; k++ {
-		if v := buckets[Upper(k)]; v < prev {
-			t.Errorf("bucket %d (%g) = %d is below the previous %d", k, Upper(k), v, prev)
-		} else {
-			prev = v
-		}
+	if len((&Hist{}).NativeBuckets()) != 0 {
+		t.Error("an empty histogram has buckets")
 	}
 }
 
-func TestUpper(t *testing.T) {
-	for _, c := range []struct {
-		k    int
-		want float64
-	}{{0, 2e-6}, {1, 4e-6}, {19, 1.048576}, {22, 8.388608}} {
-		if got := Upper(c.k); math.Abs(got-c.want) > 1e-12 {
-			t.Errorf("Upper(%d) = %g, want %g", c.k, got, c.want)
+// slotByDefinition is the k with 2^k < ns * 2^20 / 1e9 <= 2^(k+1) (0 up to 2
+// units, MaxSlots-1 beyond), in exact integer arithmetic.
+func slotByDefinition(ns uint64) int {
+	u := new(big.Int).Lsh(new(big.Int).SetUint64(ns), 20)
+	for k := range MaxSlots - 1 {
+		bound := new(big.Int).Lsh(big.NewInt(1e9), uint(k+1))
+		if u.Cmp(bound) <= 0 {
+			return k
 		}
 	}
-	if !math.IsInf(Upper(MaxSlots-1), 1) {
-		t.Error("the last slot has no upper bound")
+	return MaxSlots - 1
+}
+
+func TestSlotOf(t *testing.T) {
+	var ns []uint64
+	for k := range MaxSlots + 2 {
+		// Around every slot edge: floor(1953125 * 2^k / 2048).
+		edge := (uint64(1953125) << k) >> 11
+		for d := uint64(0); d < 3; d++ {
+			ns = append(ns, edge-d, edge+d)
+		}
+	}
+	for n := uint64(0); n < 1<<16; n++ {
+		ns = append(ns, n)
+	}
+	for j := range 64 {
+		ns = append(ns, uint64(1)<<j, uint64(1)<<j-1)
+	}
+	ns = append(ns, math.MaxUint64)
+	for _, n := range ns {
+		if got, want := slotOf(n), slotByDefinition(n); got != want {
+			t.Errorf("slotOf(%d) = %d, want %d", n, got, want)
+		}
+	}
+	// Slot k is native bucket k-19, (2^(k-20), 2^(k-19)] s: 1 ms is in
+	// (2^-10, 2^-9] s, bucket -9; exactly 1 s is in (0.5, 1], bucket 0, and
+	// 2048 s in bucket 11, the last before the catch-all.
+	for _, c := range []struct {
+		ns   uint64
+		want int
+	}{{1e6, -9}, {1e9, 0}, {1e9 + 1, 1}, {2048e9, 11}, {2048e9 + 1, 12}} {
+		if got := slotOf(c.ns) - SlotBucketOffset; got != c.want {
+			t.Errorf("%d ns is in bucket %d, want %d", c.ns, got, c.want)
+		}
 	}
 }
 

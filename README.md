@@ -175,9 +175,19 @@ never gets `CAP_BPF`. Run it as its own DaemonSet (the chart's
 | `cgroup_signals_runqueue_missed_total` | counter | | switches to a task whose wakeup was not seen (already runnable when the program attached); not in the histograms |
 | `cgroup_signals_runqueue_scan_errors_total` | counter | `op` | `discover`, `inode`, `limit`, `map`, `read` |
 
-The histogram's classic buckets are the program's log2 slots: `le` is 2e-06,
-4e-06, 8e-06, ... 8.388608 seconds (2^1 to 2^23 microseconds, 22 finite
-buckets and `+Inf`), `_sum` is exact. It is cumulative since the cgroup was
+The histogram is a Prometheus **native histogram** of schema 0: one series per
+cgroup, with buckets at powers of two seconds, (2^-20, 2^-19] s (about 1-1.9
+us) to (2048, 4096] s. The program's log2 slots are those buckets exactly,
+upper bound included: it counts in units of 2^-20 s, not microseconds. Delays
+up to 2^-19 s are in bucket -19, not the zero bucket (Prometheus's OTLP
+ingestion drops the zero threshold, which would make them zero); everything
+over 2048 s is in the last bucket. `_sum` is
+exact. There are no classic `_bucket` series: the scraper must ask for the
+protobuf format (Prometheus: `scrape_native_histograms: true`; an OpenTelemetry
+Collector's prometheus receiver: the same key, which yields an exponential
+histogram), and a Prometheus that remote-writes onwards needs
+`send_native_histograms: true`. A scrape in the text format sees no buckets,
+only the count and the sum. It is cumulative since the cgroup was
 first tracked (read at scrape, nothing is reset, any number of scrapers can read
 it). The labels are the other metrics': a pod is `pod_uid` and `qos`, a node
 service (`kubelet`, `runtime`, `system`, `init`) is `cgroup`, and
@@ -195,14 +205,14 @@ is picked is the run-queue latency; the time on the CPU is not.
 ```promql
 # p99 run-queue latency of each pod over 5 minutes
 histogram_quantile(0.99,
-  sum by (le, pod_uid) (rate(cgroup_signals_runqueue_latency_seconds_bucket{pod_uid!=""}[5m])))
+  sum by (pod_uid) (rate(cgroup_signals_runqueue_latency_seconds{pod_uid!=""}[5m])))
 
 # where the node's run-queue delay lands: seconds of waiting per second
-sum by (pod_uid, cgroup) (rate(cgroup_signals_runqueue_latency_seconds_sum[5m]))
+sum by (pod_uid, cgroup) (histogram_sum(rate(cgroup_signals_runqueue_latency_seconds[5m])))
 
-# the share of wakeups that waited over 1 ms
-1 - sum by (pod_uid, cgroup) (rate(cgroup_signals_runqueue_latency_seconds_bucket{le="0.001048576"}[5m]))
-  / sum by (pod_uid, cgroup) (rate(cgroup_signals_runqueue_latency_seconds_count[5m]))
+# the share of wakeups that waited over 1 ms (2^-10 s, a bucket bound)
+1 - histogram_fraction(0, 0.0009765625,
+  sum by (pod_uid, cgroup) (rate(cgroup_signals_runqueue_latency_seconds[5m])))
 ```
 
 ### Requirements and privileges
