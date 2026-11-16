@@ -3,6 +3,7 @@ package runqlat
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"runtime"
 	"strconv"
 	"sync"
@@ -82,13 +83,9 @@ func TestMeasure(t *testing.T) {
 	generateLoad(time.Duration(secs) * time.Second)
 	// The load must have been attributed (to histogram 1, this cgroup), not
 	// skipped: a program that returns early would look cheap.
-	var perCPU []Hist
-	if err := coll.Maps["hists"].Lookup(uint32(1), &perCPU); err != nil {
+	attributed, err := histCount(coll.Maps["hists"], 1)
+	if err != nil {
 		t.Fatal(err)
-	}
-	var h Hist
-	for i := range perCPU {
-		h.add(&perCPU[i])
 	}
 	var missed uint64
 	var mc []uint64
@@ -97,8 +94,8 @@ func TestMeasure(t *testing.T) {
 			missed += v
 		}
 	}
-	fmt.Printf("BENCH-INFO attributed=%d missed=%d\n", h.Count(), missed)
-	if h.Count() == 0 {
+	fmt.Printf("BENCH-INFO attributed=%d missed=%d\n", attributed, missed)
+	if attributed == 0 {
 		t.Fatal("no delay was attributed to the load's cgroup: the benchmark measured nothing")
 	}
 	for _, n := range names {
@@ -238,4 +235,24 @@ func measureNoop(t *testing.T, secs int) {
 		fmt.Printf("BENCH object=noop prog=noop_%s runs_per_s=%.0f ns_per_run=%.1f verified_insns=0 xlated_insns=2\n",
 			name, float64(runs)/(float64(secs)/2), float64((after.Runtime-before.Runtime).Nanoseconds())/float64(runs))
 	}
+}
+
+// histCount is the number of delays in histogram idx of m, summed over the
+// CPUs. It reads the value at the map's own size, not as Hist: CI runs this
+// binary against the base branch's object too, whose struct hist may have a
+// different number of slots (slots, then the sum, all u64).
+func histCount(m *ebpf.Map, idx uint32) (uint64, error) {
+	words := int(m.ValueSize()) / 8
+	perCPU := reflect.New(reflect.SliceOf(reflect.ArrayOf(words, reflect.TypeFor[uint64]())))
+	if err := m.Lookup(idx, perCPU.Interface()); err != nil {
+		return 0, err
+	}
+	var n uint64
+	cpus := perCPU.Elem()
+	for c := range cpus.Len() {
+		for k := range words - 1 { // the last word is the sum
+			n += cpus.Index(c).Index(k).Uint()
+		}
+	}
+	return n, nil
 }
